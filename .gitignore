@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Logs
+*.log
+
+# Secrets
+.env
+.env.*
+secrets.json
+config.local.json
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
