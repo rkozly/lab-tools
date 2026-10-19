@@ -46,6 +46,10 @@ class SimDevice:
     rooted: bool = False
     files: dict[str, bytes] = field(default_factory=dict)
     booting_until: float = 0.0
+    # Paths under these prefixes fail with "Read-only file system" until
+    # "mount -o rw,remount /" runs (verity_disabled=False: remount never helps).
+    read_only: tuple[str, ...] = ()
+    verity_disabled: bool = True
 
 
 class SimulatedAdbService(AdbService):
@@ -124,7 +128,13 @@ class SimulatedAdbService(AdbService):
         return 1, b"", f"adb: unknown command {cmd}\n".encode()
 
     def _shell(self, dev: SimDevice, command: str):
-        if command in ("setenforce 0", "mount -o rw,remount /", "sync"):
+        if command == "mount -o rw,remount /":
+            if not dev.rooted:
+                return 1, b"", b"mount: '/' not in /proc/mounts\n"
+            if dev.verity_disabled:
+                dev.read_only = ()
+            return 0, b"", b""
+        if command in ("setenforce 0", "sync"):
             return 0, b"", b""
         m = re.fullmatch(r"cat (\S+)", command)
         if m:
@@ -135,6 +145,9 @@ class SimulatedAdbService(AdbService):
         m = re.fullmatch(r"cat '([^']+)' > '([^']+)'; rc=\$\?; sync; rm -f '[^']+'; echo (\S+)\$rc", command)
         if m:
             src, dst, marker = m.groups()
+            if any(dst.startswith(ro) for ro in dev.read_only):
+                dev.files.pop(src, None)
+                return 0, f"/bin/sh: can't create {dst}: Read-only file system\n{marker}1\n".encode(), b""
             dev.files[dst] = dev.files.pop(src)
             return 0, f"{marker}0\n".encode(), b""
         return 0, b"", b""

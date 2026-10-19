@@ -97,7 +97,9 @@ class FileReplacePanel(QWidget):
         hh.setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.Stretch)
         lay.addWidget(self.table, 1)
 
-        hint = QLabel("Values that differ from the local file are highlighted. "
+        hint = QLabel("The file is pushed to the devices ticked in the Devices list above "
+                      "(other devices are dimmed). "
+                      "Values that differ from the local file are highlighted. "
                       "The device file is backed up before it is replaced.")
         hint.setObjectName("Muted")
         hint.setWordWrap(True)
@@ -109,7 +111,7 @@ class FileReplacePanel(QWidget):
         actions.addStretch(1)
         self.read_btn = button("⭳  Read Values", tooltip="Read the file from every connected device")
         self.replace_btn = button("⭱  Replace on Selected", primary=True,
-                                  tooltip="Back up, replace and verify the file on every checked device")
+                                  tooltip="Back up, replace and verify the file on every device ticked in the Devices list")
         actions.addWidget(self.read_btn)
         actions.addWidget(self.replace_btn)
         lay.addLayout(actions)
@@ -153,6 +155,7 @@ class FileReplacePanel(QWidget):
 
     # -- devices -----------------------------------------------------------------
     def set_devices(self, devices: list[Device], selected: list[Device]) -> None:
+        """``selected`` = devices ticked in the Devices list; only those are replaced."""
         self._devices = [d for d in devices if d.configured or d.is_ready]
         self._selected = [d for d in selected if d.is_ready]
         old = self._rows
@@ -192,6 +195,7 @@ class FileReplacePanel(QWidget):
     def _render(self) -> None:
         rows = ([self._local] if self._local else []) + list(self._rows.values())
         local_vals = self._local.values if self._local else None
+        targets = {d.serial for d in self._selected}
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             self.table.setItem(i, 0, QTableWidgetItem(r.name))
@@ -210,6 +214,10 @@ class FileReplacePanel(QWidget):
             status.setForeground(QColor(color))
             status.setToolTip(r.status)
             self.table.setItem(i, len(COLUMNS) - 1, status)
+            if not r.local and r.serial not in targets:
+                for c in range(len(COLUMNS)):
+                    self.table.item(i, c).setForeground(QColor(COLORS["muted"]))
+                self.table.item(i, 0).setToolTip("Not ticked in the Devices list - will not be replaced")
             if r.local:
                 for c in range(len(COLUMNS)):
                     f = self.table.item(i, c).font()

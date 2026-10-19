@@ -351,7 +351,39 @@ class AdbService:
         The data is pushed to a staging file and then copied over the target with
         ``cat staged > target``. Unlike pushing directly onto the target this keeps
         the file's inode, owner, permissions and SELinux label intact.
+
+        If the target is on a read-only file system, the device is made writable
+        (root, remount, setenforce 0, mount -o rw,remount /) and the write is
+        retried once. That fails only if verity is still enabled - then the
+        full Prepare (with reboot) is needed.
         """
+        from devreader.core.preparation import is_read_only_error, make_writable
+
+        try:
+            self._write_file(serial, remote_path, data, cancel=cancel, timeout=timeout)
+            return
+        except AdbCommandError as exc:
+            if not is_read_only_error(exc):
+                raise
+        if not make_writable(self, self._log, serial, cancel):
+            raise AdbCommandError(
+                f"{remote_path} is on a read-only file system and remount failed. "
+                "Run Prepare on this device (disable-verity + reboot), then write again.",
+                serial=serial,
+            )
+        try:
+            self._write_file(serial, remote_path, data, cancel=cancel, timeout=timeout)
+        except AdbCommandError as exc:
+            if is_read_only_error(exc):
+                raise AdbCommandError(
+                    f"{remote_path} is still read-only after remount. "
+                    "Run Prepare on this device (disable-verity + reboot), then write again.",
+                    command=exc.command, output=exc.output, serial=serial,
+                ) from exc
+            raise
+        self._log.success(f"{remote_path} written after remount", device=serial)
+
+    def _write_file(self, serial: str, remote_path: str, data: bytes, *, cancel=None, timeout=60.0) -> None:
         name = remote_path.rstrip("/").rsplit("/", 1)[-1]
         staged: str | None = None
         last_exc: AdbError | None = None

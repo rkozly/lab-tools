@@ -130,16 +130,36 @@ WIRELESS_TABLE = TableDef(
     ),
 )
 
+# scan_freq is editable where it already exists in a block (it is never added).
 WPA_SUPPLICANT_TABLE = TableDef(
     id="wpa_supplicant_table",
     remote_path="/lib/wifi/wpa_supplicant.sh",
     format="wpa_networks",
-    read_only=True,
     columns=tuple(
         column(f"scan_freq{i}", f"network {i + 1} scan_freq",
-               {"section": f"network[{i}]", "key": "scan_freq"}, read_only=True, required=False)
+               {"section": f"network[{i}]", "key": "scan_freq"},
+               required=False, pattern=r"\d+")
         for i in range(2)
     ),
 )
 
-TABLES: tuple[TableDef, ...] = (WIRELESS_TABLE, WPA_SUPPLICANT_TABLE)
+# Firmware build IDs (JSON). Columns are "section" = top-level object, "key" = member.
+VER_INFO_TABLE = TableDef(
+    id="ver_info_table",
+    remote_path="/firmware/verinfo/ver_info.txt",
+    format="json",
+    read_only=True,
+    flash_wlan=True,
+    columns=tuple(
+        column(id, label, {"section": section, "key": key}, read_only=True, required=False)
+        for id, label, section, key in (
+            ("meta_build", "Meta_Build_ID", "Metabuild_Info", "Meta_Build_ID"),
+            ("apps", "apps", "Image_Build_IDs", "apps"),
+            ("modem", "modem", "Image_Build_IDs", "modem"),
+            ("wlan_wkk", "wlan_wkk", "Image_Build_IDs", "wlan_wkk"),
+            ("tz_apps", "tz_apps", "Image_Build_IDs", "tz_apps"),
+        )
+    ),
+)
+
+TABLES: tuple[TableDef, ...] = (WIRELESS_TABLE, WPA_SUPPLICANT_TABLE, VER_INFO_TABLE)

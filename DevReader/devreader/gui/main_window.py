@@ -28,6 +28,9 @@ from devreader.config.table import AP_NAME, TableDef, TableRead, read_table, wri
 from devreader.core.adb_service import AdbService
 from devreader.core.discovery import ENV_PREFIX, Device, DiscoveryResult, DiscoveryService
 from devreader.core.errors import CancelledError, ConfigValidationError, DevReaderError
+from devreader.core.firmware import (
+    VER_INFO_PATH, WLAN_FILES, WLAN_TARGET_DIR, FirmwareService, FlashResult, missing_files, role_of,
+)
 from devreader.core.logging_service import LogService
 from devreader.core.paths import app_data_dir, backups_dir
 from devreader.core.preparation import PrepareReport, PreparationService
@@ -52,6 +55,7 @@ class MainWindow(QMainWindow):
         self.log, self.adb, self.discovery = log, adb, discovery
         self.preparation, self.config_service = preparation, config
         self.replace_service = FileReplaceService(adb, log, backup_dir=backups_dir())
+        self.firmware_service = FirmwareService(adb, log, backup_dir=backups_dir())
         self.simulated = simulated
         self._server_started = False
         self.settings = QSettings()
@@ -95,6 +99,7 @@ class MainWindow(QMainWindow):
         for panel in self.config_panel.tables.values():
             panel.read_requested.connect(self.read_table)
             panel.write_requested.connect(self.write_table)
+            panel.flash_requested.connect(self.flash_wlan)
         self.config_panel.replace_panel.read_requested.connect(self.read_replace_values)
         self.config_panel.replace_panel.replace_requested.connect(self.replace_file)
 
@@ -430,6 +435,92 @@ class MainWindow(QMainWindow):
             self.runner.submit(task, on_result=done, on_error=failed,
                                on_finished=lambda s=dev.serial: self.device_panel.model.set_busy(s, False))
         self._status(f"Reading {remote_path} from {len(devices)} device(s)…")
+
+    # ------------------------------------------------------------------
+    # Flash wlan_wkk
+    # ------------------------------------------------------------------
+    def flash_wlan(self, table: TableDef) -> None:
+        targets = [d for d in self.device_panel.checked_devices() if d.is_ready]
+        if not targets:
+            self.toasts.show("warning", "No devices selected", "Tick the connected devices to flash.")
+            return
+        start = self.settings.value("flash/wlan_folder", "") or ""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose the WLAN build folder (e.g. WLAN.SDX_MRR.1.0-...)", start)
+        if not folder:
+            return
+        folder_path = Path(folder)
+        self.settings.setValue("flash/wlan_folder", str(folder_path.parent))
+
+        problems = []
+        for role in sorted({role_of(d.name == AP_NAME) for d in targets}):
+            missing = missing_files(folder_path, role)
+            if missing:
+                problems.append(f"{role.upper()} images missing: {', '.join(missing)}")
+        if problems:
+            QMessageBox.warning(self, "Flash wlan_wkk", f"{folder_path}\n\n" + "\n".join(problems))
+            return
+
+        lines = [f"  {d.name}: {', '.join(WLAN_FILES[role_of(d.name == AP_NAME)])}" for d in targets]
+        if QMessageBox.question(
+            self, "Flash wlan_wkk",
+            f"Flash WLAN firmware from\n{folder_path}\n\nto {WLAN_TARGET_DIR} on:\n" + "\n".join(lines)
+            + "\n\nEach device runs root, setenforce 0, mount -o remount,rw /firmware, "
+              f"pushes the files, sets wlan_wkk in {VER_INFO_PATH} to\n{folder_path.name}\n"
+              "(backup saved first), runs mount -o remount,ro /firmware and then REBOOTS.",
+        ) != QMessageBox.Yes:
+            return
+
+        panel = self.config_panel.table(table.id)
+        pending = {d.serial for d in targets}
+        failures: list[str] = []
+
+        def finish(serial: str) -> None:
+            pending.discard(serial)
+            if pending:
+                return
+            if failures:
+                panel.set_summary("Flash failed", "error")
+                self.toasts.show("error", "Flash failed", "\n".join(failures), msecs=9000)
+                self._status("Flash failed")
+            else:
+                panel.set_summary(f"Flashed {len(targets)} device(s) - rebooting", "success")
+                self.toasts.show("success", "wlan_wkk flashed",
+                                 f"{folder_path.name} pushed to {', '.join(d.name for d in targets)}. "
+                                 "Devices are rebooting - press Read All when they are back.")
+                self._status("wlan_wkk flashed - devices rebooting")
+            QTimer.singleShot(5000, self.refresh)
+
+        for dev in targets:
+            panel.set_row_status(dev.serial, "Flashing…", None)
+            self.device_panel.model.set_busy(dev.serial, True)
+
+            def task(ctx: TaskContext, dev=dev):
+                return self.firmware_service.flash_wlan(
+                    dev.serial, folder_path, is_ap=dev.name == AP_NAME, cancel=ctx.cancel,
+                    on_progress=lambda s, i, n, title: ctx.progress(s, i, n, f"{min(i + 1, n)}/{n}  {title}"),
+                )
+
+            def done(result: FlashResult, dev=dev):
+                panel.set_row_status(dev.serial, f"Flashed {folder_path.name} - rebooting", True)
+                self.device_panel.model.set_last_action(dev.serial, f"Flashed {folder_path.name}", True)
+                finish(dev.serial)
+
+            def failed(exc, tb, dev=dev):
+                panel.set_row_status(dev.serial, f"Flash failed: {exc}", False)
+                self.device_panel.model.set_last_action(dev.serial, f"Flash failed: {exc}", False)
+                failures.append(f"{dev.name}: {exc}")
+                self._on_task_error(exc, tb, title=None, device=dev.serial)
+                finish(dev.serial)
+
+            def cleanup(s=dev.serial):
+                self.device_panel.model.set_busy(s, False)
+                self.device_panel.model.clear_progress(s)
+
+            self.runner.submit(task, on_result=done, on_error=failed,
+                               on_progress=lambda k, v, m, t: self.device_panel.model.set_progress(k, v, m, t),
+                               on_finished=cleanup)
+        self._status(f"Flashing wlan_wkk on {len(targets)} device(s)…")
 
     def replace_file(self, remote_path: str, local_path: str, targets: list[Device]) -> None:
         panel = self.config_panel.replace_panel

@@ -79,6 +79,29 @@ PREPARE_STEPS: Sequence[PrepStep] = (
 )
 
 
+# Subset of PREPARE_STEPS that makes / writable again without a reboot. Enough
+# when verity is already disabled (Prepare ran once since the last flash).
+REMOUNT_STEPS: Sequence[PrepStep] = tuple(
+    s for s in PREPARE_STEPS
+    if s.title in ("Root (after reboot)", "Remount", "SELinux permissive", "Remount / read-write")
+)
+
+READ_ONLY_MARKERS = ("read-only file system", "read only file system")
+
+
+def is_read_only_error(exc: BaseException) -> bool:
+    text = f"{exc} {getattr(exc, 'output', '') or ''}".lower()
+    return any(m in text for m in READ_ONLY_MARKERS)
+
+
+def make_writable(adb: AdbService, log: LogService, serial: str,
+                  cancel: threading.Event | None = None) -> bool:
+    """root + remount + setenforce 0 + mount -o rw,remount / (no reboot). True if all fatal steps passed."""
+    log.warning("File system is read-only - trying root + remount (no reboot)", device=serial)
+    report = PreparationService(adb, log, REMOUNT_STEPS).prepare(serial, cancel=cancel)
+    return report.ok
+
+
 def check_ready(adb: AdbService, serial: str) -> None:
     """Raise a specific :class:`AdbError` unless ``serial`` is connected and authorized."""
     state = adb.devices().get(serial, DeviceState.DISCONNECTED)

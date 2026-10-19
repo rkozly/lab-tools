@@ -21,11 +21,12 @@ from pathlib import Path
 from typing import Mapping
 
 from devreader.config.parameters import ConfigFileDef, ParameterDef
+from devreader.config.jsoncfg import JsonDocument
 from devreader.config.uci import UciDocument
 from devreader.config.wpa import WpaNetworkDocument
 
 # Parser per ConfigFileDef.format. Writable formats must also provide set()/to_bytes().
-DOCUMENT_TYPES = {"uci": UciDocument, "wpa_networks": WpaNetworkDocument}
+DOCUMENT_TYPES = {"uci": UciDocument, "wpa_networks": WpaNetworkDocument, "json": JsonDocument}
 from devreader.core.adb_service import AdbService
 from devreader.core.errors import (
     AdbError,
@@ -184,7 +185,7 @@ class ConfigService:
                 f"(sha1 device={_sha1(readback)} expected={_sha1(new_bytes)}). Backup: {backup}",
                 serial=serial,
             )
-        check_doc = UciDocument.from_bytes(readback)
+        check_doc = DOCUMENT_TYPES[config.format].from_bytes(readback)
         verified: dict[str, str | None] = {}
         mismatches = []
         for p, value in params:

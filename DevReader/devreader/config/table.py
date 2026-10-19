@@ -43,6 +43,8 @@ class TableDef:
     columns: tuple[Column, ...]
     format: str = "uci"
     read_only: bool = False
+    # Show the "Flash wlan_wkk…" button (see devreader.core.firmware).
+    flash_wlan: bool = False
 
     @property
     def title(self) -> str:

@@ -28,6 +28,7 @@ FIXED = ["Device", "Serial"]
 class ConfigTablePanel(QWidget):
     read_requested = Signal(object, object)    # TableDef, [Device]
     write_requested = Signal(object, object)   # TableDef, {serial: {ParameterDef: value}}
+    flash_requested = Signal(object)           # TableDef
 
     def __init__(self, table: TableDef, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -78,6 +79,12 @@ class ConfigTablePanel(QWidget):
                                 tooltip="Write the edited values (backup + verify on each device)")
         self.write_btn.setVisible(not table.read_only)
         self.revert_btn.setVisible(not table.read_only)
+        self.flash_btn = button("⚡  Flash wlan_wkk…",
+                                tooltip="Push WLAN firmware from a build folder to the devices ticked in the "
+                                        "Devices list, then reboot them")
+        self.flash_btn.setVisible(table.flash_wlan)
+        self.flash_btn.clicked.connect(lambda: self.flash_requested.emit(self.table_def))
+        actions.addWidget(self.flash_btn)
         actions.addWidget(self.revert_btn)
         actions.addWidget(self.read_btn)
         actions.addWidget(self.write_btn)
