@@ -1,0 +1,154 @@
+# Built-in presets. Do not edit here: edit a preset in LabHub and it is
+# saved to your user file (%APPDATA%\LabHub\user.yaml), which wins over this
+# file. Lab files may also have a `presets:` list.
+#
+# kind: exec      run `script` (one or more lines) on each target
+#       sequence  start a menu program and type `steps`, waiting for `prompt`
+#       monitor   run `command` every `interval_s` and show parsed stats
+# Placeholders: {param}  {name} (CPE1)  {n} (1)  {id}  {serial}
+
+presets:
+  - id: ap-short-scan
+    name: AP Short Scan
+    category: Scan
+    roles: [ap]
+    params:
+      value: { default: "2" }      # hw_ver_override value; long scan = no command at all
+    script: cfg80211tool wifi0 hw_ver_override {value}
+
+  - id: cpe-short-scan
+    name: CPE Short Scan
+    category: Scan
+    roles: [cpe]
+    params:
+      channel:
+        choices: { A: 26660, B: 27000, C: 27340 }
+    script: |
+      cfg80211tool wifi0 freq_scan_num_rf_channels 1
+      cfg80211tool wifi0 freq_scan_rf_channel_0 {channel}
+      cfg80211tool wifi0 freq_scan_rf_channel_mask_0 256
+      cfg80211tool wifi0 hw_ver_override 2
+
+  # QCMAP_CLI menus. Each group is typed key by key; after every key LabHub waits
+  # until the menu has printed something and gone quiet (settle_ms), then waits
+  # delay_ms. After each group the output must match `success`, else it stops.
+  - id: ap-bridge-mode
+    name: AP Bridge Mode
+    category: QCMAP
+    roles: [ap]
+    kind: sequence
+    sequence:
+      start: QCMAP_CLI
+      groups: [["1", "2", "1"], ["4", "29", "1"], ["4", "1", "1"]]
+      success: '(?i)\b(succe\w*|pass(ed)?\b|enabled\b)'
+      delay_ms: 1000
+      settle_ms: 800
+      step_timeout_s: 20
+
+  - id: ap-routing-mode
+    name: AP Routing Mode
+    category: QCMAP
+    roles: [ap]
+    kind: sequence
+    sequence:
+      start: QCMAP_CLI
+      groups: [["1", "2", "1"], ["4", "1", "1"]]
+      success: '(?i)\b(succe\w*|pass(ed)?\b|enabled\b)'
+      delay_ms: 1000
+      settle_ms: 800
+      step_timeout_s: 20
+
+  - id: cpe-bridge-mode
+    name: CPE Bridge Mode
+    category: QCMAP
+    roles: [cpe]
+    kind: sequence
+    sequence:
+      start: QCMAP_CLI
+      groups: [["1", "2", "1"], ["4", "33", "1"], ["4", "1", "1"]]
+      success: '(?i)\b(succe\w*|pass(ed)?\b|enabled\b)'
+      delay_ms: 1000
+      settle_ms: 800
+      step_timeout_s: 20
+
+  - id: ap-stats
+    name: AP Stats
+    category: Stats
+    roles: [ap]
+    kind: monitor
+    monitor:
+      interval_s: 1
+      parser: wifistats.ap
+      command: >-
+        echo '##legacy wifi0'; cat /proc/uptime; wifistats wifi0 9 | grep -E 'Legacy OFDM Rates';
+        echo '##legacy wifi1'; cat /proc/uptime; wifistats wifi1 9 | grep -E 'Legacy OFDM Rates';
+        echo '##radio wifi0'; wifistats wifi0 9 | grep -E '^tx_mcs';
+        echo '##radio wifi1'; wifistats wifi1 9 | grep -E '^tx_mcs';
+        echo '##rx wifi0'; wifistats wifi0 10 | grep -E '^rx_bw|^rx_mcs|^rx_legacy_ofdm_rate|^rssi_in_dbm|pilot_evm_dB\[0\]|pilot_evm_dB\[1\]|la';
+        echo '##rx wifi1'; wifistats wifi1 10 | grep -E '^rx_bw|^rx_mcs|^rx_legacy_ofdm_rate|^rssi_in_dbm|pilot_evm_dB\[0\]|pilot_evm_dB\[1\]|la';
+        echo '##mld mld0'; wlanconfig mld0 list; echo '##mld mld1'; wlanconfig mld1 list
+
+  - id: cpe-stats
+    name: CPE Stats
+    category: Stats
+    roles: [cpe]
+    kind: monitor
+    monitor:
+      interval_s: 1
+      parser: wifistats.cpe
+      command: >-
+        echo '##radio wifi0'; wifistats wifi0 9 | grep -E '^tx_mcs';
+        echo '##rx wifi0'; wifistats wifi0 10 | grep -E '^rx_bw|^rx_mcs|^rx_legacy_ofdm_rate|^rssi_in_dbm|pilot_evm_dB\[0\]|pilot_evm_dB\[1\]|la';
+        echo '##ifconfig'; ifconfig ath0; echo '##link'; iw ath0 link
+
+  # The original watch commands, for the console (raw output).
+  - id: ap-stats-watch
+    name: AP Stats (watch, raw)
+    category: Stats
+    roles: [ap]
+    script: >-
+      watch -n 1 "wifistats wifi0 9 | grep -E 'Legacy OFDM Rates'; wifistats wifi1 9 | grep -E 'Legacy OFDM Rates'; wifistats wifi0 9 | grep -E '^tx_mcs'; wifistats wifi1 9 | grep -E '^tx_mcs'; echo ''; wifistats wifi0 10 | grep -E '^rx_bw|^rx_mcs|^rx_legacy_ofdm_rate|^rssi_in_dbm|pilot_evm_dB\[0\]|pilot_evm_dB\[1\]|la'; echo; wifistats wifi1 10 | grep -E '^rx_bw|^rx_mcs|^rx_legacy_ofdm_rate|^rssi_in_dbm|pilot_evm_dB\[0\]|pilot_evm_dB\[1\]|la'; echo; wlanconfig mld0 list; wlanconfig mld1 list"
+
+  - id: cpe-stats-watch
+    name: CPE Stats (watch, raw)
+    category: Stats
+    roles: [cpe]
+    script: >-
+      watch -n 1 "wifistats wifi0 9 | grep -E '^tx_mcs'; echo''; wifistats wifi0 10 | grep -E '^rx_bw|^rx_mcs|^rx_legacy_ofdm_rate|^rssi_in_dbm|pilot_evm_dB\[0\]|pilot_evm_dB\[1\]|la' ; echo ''; ifconfig ath0; echo ''; iw ath0 link"
+
+  # Backbones
+  - id: bb-kill-dhcpd
+    name: Kill dhcpd
+    category: Backbone
+    roles: [backbone]
+    script: killall dhcpd
+
+  - id: bb-start-dhcpd
+    name: Start dhcpd (IPv6)
+    category: Backbone
+    roles: [backbone]
+    script: dhcpd -6 -d -cf /etc/dhcp/dhcpd6_combined.conf AP.960 v10371015
+
+  - id: bb-kill-dhclient
+    name: Kill dhclient
+    category: Backbone
+    roles: [backbone]
+    script: killall dhclient
+
+  - id: bb-dhclient
+    name: dhclient for CPE{n}
+    category: Backbone
+    roles: [backbone]
+    script: dhclient -6 -v CPE{n}.960 CPE{n}.1015
+
+  - id: bb-route
+    name: Set route for CPE{n}
+    category: Backbone
+    roles: [backbone]
+    script: ip -6 r a 2008:db9::20 dev CPE{n}.1015 proto kernel
+
+  - id: scan-results
+    name: Scan results
+    category: Scan
+    roles: [ap, cpe]
+    script: iw dev ath0 scan dump

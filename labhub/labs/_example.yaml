@@ -1,0 +1,34 @@
+# Example lab file. Copy it to <your lab>.yaml (files starting with _ are not listed).
+version: 1
+lab: Example lab
+
+backbones:
+  ap-bb:
+    name: AP BB
+    connect: { type: ssh, host: 10.0.0.20, user: root }
+  cpe-bb:
+    name: CPE BB
+    connect: { type: ssh, host: 10.0.0.21, user: root }
+
+devices:
+  ap:
+    name: AP
+    role: ap
+    serial: ${env:adb_device_id_ap}
+    backbone: { id: ap-bb, interfaces: [AP.960, v10371015] }
+  cpe1:
+    name: CPE1
+    role: cpe
+    serial: ${env:adb_device_id_cpe1}
+    backbone: { id: cpe-bb, interfaces: [CPE1.960, CPE1.1015] }
+  cpe2:
+    name: CPE2
+    role: cpe
+    serial: ${env:adb_device_id_cpe2}
+    backbone: { id: cpe-bb, interfaces: [CPE2.960, CPE2.1015] }
+
+groups:
+  first-two: [cpe1, cpe2]
+
+features:
+  monitor: { rssi_good_dbm: -55, rssi_poor_dbm: -70 }
