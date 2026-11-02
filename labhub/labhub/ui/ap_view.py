@@ -582,6 +582,7 @@ class ApView(QWidget):
     shell_open = Signal()
     shell_show = Signal()
     reboot_requested = Signal()
+    license_push = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -593,6 +594,14 @@ class ApView(QWidget):
         self.shell_state = QLabel("AP shell: not open")
         self.shell_state.setStyleSheet("color: #8a90a0; background: transparent;")
         bar.addWidget(self.shell_state, 1)
+        self.max_sta = QLabel()
+        self.max_sta.setToolTip("max_sta from the AP's QWES lines:\ntail -f -n +1 /tmp/hostapd.txt | grep QWES")
+        bar.addWidget(self.max_sta)
+        self.set_max_sta(None)
+        b = QPushButton("🔑 Push license")
+        b.setToolTip("adb push of the license file (Mappings → AP license) to the AP")
+        b.clicked.connect(self.license_push.emit)
+        bar.addWidget(b)
         b = QPushButton("⌨ Open AP shell")
         b.setToolTip("adb root + adb shell on the AP. The steps below run in this shell.")
         b.clicked.connect(self.shell_open.emit)
@@ -802,6 +811,14 @@ class ApView(QWidget):
         self.results.insertItem(0, it)
         while self.results.count() > 200:
             self.results.takeItem(self.results.count() - 1)
+
+    def set_max_sta(self, value: int | None, detail: str = "") -> None:
+        """Stations the license allows; None -> N/A in red."""
+        ok = value is not None
+        self.max_sta.setText(f"  Max stations: {value if ok else 'N/A'}  ")
+        self.max_sta.setStyleSheet(f"color: {'#3ccf7a' if ok else '#ff6b7a'}; font-weight: 600; background: transparent;")
+        if detail:
+            self.max_sta.setToolTip(detail)
 
     def set_shell(self, status: str, message: str = "") -> None:
         text, color = {"open": ("● AP shell connected", "#3ccf7a"),

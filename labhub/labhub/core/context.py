@@ -12,6 +12,7 @@ import yaml
 
 from . import config as cfg
 from .bbnet import BbNetService
+from .license import LicenseService
 from .topology import TopologyService
 from .events import EventBus
 from .live import BeaconStore, PollerManager, SampleStore
@@ -65,6 +66,7 @@ class AppContext:
         self.ramdumps = RamdumpService(self.bus, self.registry)
         self.reboots = RebootService(self.bus, self.registry, self.shells)
         self.bbnet = BbNetService(self.bus)
+        self.license = LicenseService(self.bus)
         self.topology = TopologyService(self.bus)
         self.samples = SampleStore(self.bus)
         self.beacons = BeaconStore(self.bus)

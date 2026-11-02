@@ -29,6 +29,7 @@ from ..core.sequence import (DEFAULT_SUCCESS_WORDS, CheckResult, CommandCheck, M
                              SequenceProgress, words_regex)
 from ..core.ramdump import DumpAction, DumpListing
 from ..core.reboot import RebootProgress
+from ..core import license as lic
 from .ap_view import ApView
 from ..core.targets import TargetError, node_role
 from ..discovery.adb_discovery import Discovery
@@ -124,6 +125,10 @@ class MainWindow(QMainWindow):
         self.ap.shell_open.connect(lambda: [self._open_one_shell(n, show=False) for n in self._need_ap()])
         self.ap.shell_show.connect(self._show_ap_shell)
         self.ap.reboot_requested.connect(lambda: self.reboot(self._need_ap()))
+        self.ap.license_push.connect(self.push_license)
+        self._qwes_carry: dict[str, str] = {}   # qwes shell key -> unfinished line
+        self._qwes_timer = QTimer(self, interval=8000, timeout=self._qwes_tick)
+        self._qwes_timer.start()
         self.ap.mode.currentIndexChanged.connect(self._qcmap_groups)
         self.ap.success_words.setText(ctx.user.get("qcmap_success_words") or DEFAULT_SUCCESS_WORDS)
         self.ap.success_words.editingFinished.connect(
@@ -407,11 +412,17 @@ class MainWindow(QMainWindow):
             if e.ok and e.dest:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(e.dest))
         elif isinstance(e, ShellOutput):
-            if not self.stats.output(e.session, e.text, e.clear):
+            if e.session.node_id.startswith(self.QWES_KEY.format("")):
+                self._qwes_output(e.session, e.text)
+            elif not self.stats.output(e.session, e.text, e.clear):
                 self.console.shell_output(e.session, e.text, e.clear)
                 if "[SUM" in e.text or e.session.node_id in self._iperf_carry:
                     self._iperf_lines(e.session, e.text)
         elif isinstance(e, ShellState):
+            if e.session.node_id.startswith(self.QWES_KEY.format("")):
+                if e.session.status == "closed" and self.ctx.shells.sessions.get(e.session.node_id) in (None, e.session):
+                    self.ap.set_max_sta(None, f"QWES watch closed: {e.session.message or 'shell ended'}")
+                return
             if self.stats.state(e.session):
                 return
             self.console.shell_state(e.session)
@@ -445,6 +456,11 @@ class MainWindow(QMainWindow):
                 pane.set_quick_state(e.key, ok, f"exit {e.code}: {e.output[:300]}" if e.output else f"exit {e.code}")
                 pane.note(f"{qc.label}: exit {e.code}" + (f"\n{e.output}" if e.output else ""))
             QTimer.singleShot(1500, lambda nid=e.node_id: self.check_bb_addrs(nid))
+        elif isinstance(e, lic.LicensePushed):
+            self.ap.log(e.ok, f"License push to {e.name}: {e.text}")
+            self.statusBar().showMessage(f"License push to {e.name}: {'OK' if e.ok else 'FAILED'} – {e.text}", 15000)
+            if not e.ok:
+                QMessageBox.warning(self, "Push license", f"License push to {e.name} failed:\n\n{e.text}")
         elif isinstance(e, BbPeerAddr):
             self._peer_ready(e)
         elif isinstance(e, SampleAdded):
@@ -564,6 +580,9 @@ class MainWindow(QMainWindow):
     def stop_everything(self) -> None:
         self.ctx.runner.stop_all()
         n = self.ctx.shells.interrupt_all()
+        for ap in self._ap_nodes(connected=False):   # Ctrl+C also stopped the QWES tail: start it again
+            self.ctx.shells.close(self.QWES_KEY.format(ap.id))
+        QTimer.singleShot(1500, self._qwes_tick)
         self.stop_all_stats()
         self.stop_all_graphs()
         self.statusBar().showMessage("Stopping all running commands…" + (f" (Ctrl+C sent to {n} shell(s))" if n else ""), 4000)
@@ -1199,6 +1218,46 @@ class MainWindow(QMainWindow):
     # --- close --------------------------------------------------------------
 
     # --- AP workflow --------------------------------------------------------
+
+    # --- AP license (QWES max_sta) ---------------------------------------------
+
+    QWES_KEY = "qwes:{}"
+
+    def _qwes_tick(self) -> None:
+        """Keep a hidden shell on the AP running the QWES tail; reopened after a reboot / disconnect."""
+        aps = self._ap_nodes(connected=False)
+        ap = aps[0] if aps else None
+        if ap is None or ap.state.status.value != "connected" or self.ctx.reboots.is_rebooting(ap.id):
+            self.ap.set_max_sta(None, "AP not connected" if ap else "no AP in the lab")
+            return
+        key = self.QWES_KEY.format(ap.id)
+        if self.ctx.shells.is_open(key):
+            return
+        self.ctx.shells.close(key)
+        self._qwes_carry.pop(key, None)
+        if self.ctx.shells.open(ap, key, f"{ap.name} QWES") is None:
+            self.ctx.shells.sessions[key].write(lic.WATCH_CMD + "\n")   # queued until adb root is done
+
+    def _qwes_output(self, session, text: str) -> None:
+        buf = self._qwes_carry.pop(session.node_id, "") + text
+        lines = buf.split("\n")
+        self._qwes_carry[session.node_id] = lines[-1][-400:]
+        value = lic.last_max_sta("\n".join(lines[:-1]))
+        if value is not None:
+            last = next(l for l in reversed(lines[:-1]) if "max_sta=" in l).strip()
+            self.ap.set_max_sta(value, f"{last}\n\nfrom: {lic.WATCH_CMD}")
+
+    def push_license(self) -> None:
+        aps = self._need_ap()
+        if not aps:
+            return
+        ap = aps[0]
+        local, dest = lic.settings(self.ctx.lab.features)
+        if QMessageBox.question(self, "Push license", f"Push the license to {ap.name}?\n\n{local}\n→ {dest}/") \
+                != QMessageBox.Yes:
+            return
+        self.ap.log(None, f"License push to {ap.name}: adb push … {dest}/")
+        self.ctx.license.push(ap.id, ap.name, self.ctx.registry.serial_of(ap), local, dest)
 
     def _ap_nodes(self, connected: bool = True):
         nodes = [n for n in self.ctx.registry.nodes()

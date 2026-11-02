@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ..core import config as cfg
+from ..core import license as lic
 from ..core.models import (BackboneConfig, BackboneLink, ConnectSpec,
                            DeviceConfig, Lab)
 from ..transports.ssh_exec import PASS_ENV
@@ -108,6 +109,21 @@ class MappingEditor(QDialog):
         hint.setObjectName("Muted")
         lay.addWidget(hint)
 
+        lic_row = QHBoxLayout()
+        lic_row.addWidget(QLabel("AP license file"))
+        lic_file, lic_dest = lic.settings(self.lab.features)
+        self.lic_file = QLineEdit(lic_file)
+        self.lic_file.setToolTip("Pushed to the AP by AP tab → 🔑 Push license (adb push)")
+        lic_row.addWidget(self.lic_file, 3)
+        b = QPushButton("…")
+        b.setToolTip("Pick the license file")
+        b.clicked.connect(self._pick_license)
+        lic_row.addWidget(b)
+        lic_row.addWidget(QLabel("→ on the AP"))
+        self.lic_dest = QLineEdit(lic_dest)
+        lic_row.addWidget(self.lic_dest, 1)
+        lay.addLayout(lic_row)
+
         self._extra: dict[str, dict] = {}
         for d in sorted(self.lab.devices.values(), key=lambda d: (role_of(d.name) != "ap", d.name)):
             bb = self.lab.backbones.get(d.backbone.backbone_id) if d.backbone else None
@@ -168,13 +184,25 @@ class MappingEditor(QDialog):
         if not quiet:
             QMessageBox.information(self, "Import", f"Added {added} device(s) from adb_device_id_* variables.")
 
+    def _pick_license(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "AP license file", self.lic_file.text(),
+                                              "License (*.pfm);;All files (*)")
+        if path:
+            self.lic_file.setText(os.path.normpath(path))
+
     def _text(self, r: int, c: int) -> str:
         it = self.table.item(r, c)
         return it.text().strip() if it else ""
 
     def _collect(self) -> Lab:
+        features = dict(self.lab.features)
+        dest = self.lic_dest.text().strip()
+        if dest and not dest.startswith("/"):
+            raise cfg.ConfigError(f"license folder on the AP '{dest}' must start with /")
+        features["license"] = {"file": self.lic_file.text().strip() or lic.DEFAULT_FILE,
+                               "dest": dest or lic.DEFAULT_DEST}
         lab = Lab(name=self.name.text().strip() or "Lab", path=self.lab.path, groups=self.lab.groups,
-                  features=self.lab.features, presets=self.lab.presets)
+                  features=features, presets=self.lab.presets)
         for r in range(self.table.rowCount()):
             name, did = self._text(r, 0), self._text(r, 1)
             if not name and not did:
