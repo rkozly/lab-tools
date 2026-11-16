@@ -24,17 +24,23 @@ config qcawifi 'qcawifi'
 \toption rf_freq2_KHz '26000000'
 \toption enable_rfsim '1'	# keep me
 
+config wifi-device
+\toption type 'qcawifi'
+\toption disabled '1'
+
 config wifi-device 'wifi0'
 \toption type 'qcawifi'
 \toption channel '36'
 \toption htmode 'HE80'
 \toption country 'US'
+\toption disabled '0'
 \t# option disabled '1'
 
 config wifi-iface
 \toption device 'wifi0'
 \toption mode 'ap'
 \toption ssid "Rozaline Lab"
+\toption disabled '0'
 \tlist maclist '00:11:22:33:44:55'
 """
 

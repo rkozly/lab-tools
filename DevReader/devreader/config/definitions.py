@@ -100,7 +100,8 @@ def get_config_file(file_id: str) -> ConfigFileDef:
 # ----------------------------------------------------------------------
 # Per-device tables (one tab per remote file). See devreader.config.table.
 # ----------------------------------------------------------------------
-from devreader.config.table import MAC_PATTERN, TableDef, column  # noqa: E402
+from devreader.config.parameters import ParamType  # noqa: E402
+from devreader.config.table import MAC_PATTERN, DiscoveredColumns, TableDef, column  # noqa: E402
 
 _CHANNEL = {"type": "int", "min": 0, "max": 233}
 _MAC = {"pattern": MAC_PATTERN}
@@ -127,6 +128,21 @@ WIRELESS_TABLE = TableDef(
                {"section": "wifi1", "section_type": "wifi-device", "key": "channel"}, ap_only=True, **_CHANNEL),
         column("wifi1_mac", "wifi1 macaddr",
                {"section": "wifi1", "section_type": "wifi-device", "key": "macaddr"}, ap_only=True, **_MAC),
+    ),
+)
+
+# Every "option disabled" in the wireless file: the lines `uci show wireless | grep disabled`
+# prints (wifi0, @wifi-device[0], @wifi-iface[0], ...). The columns come from each device's file,
+# so sections that only exist on the AP show up without listing them here.
+WIRELESS_DISABLED_TABLE = TableDef(
+    id="wireless_disabled_table",
+    remote_path="/etc/config/wireless",
+    tab_title="/etc/config/wireless (disabled)",
+    discover=DiscoveredColumns(
+        key="disabled",
+        type=ParamType.CHOICE,
+        choices=("0", "1"),
+        choice_labels=("0 (enabled)", "1 (disabled)"),
     ),
 )
 
@@ -162,4 +178,4 @@ VER_INFO_TABLE = TableDef(
     ),
 )
 
-TABLES: tuple[TableDef, ...] = (WIRELESS_TABLE, WPA_SUPPLICANT_TABLE, VER_INFO_TABLE)
+TABLES: tuple[TableDef, ...] = (WIRELESS_TABLE, WIRELESS_DISABLED_TABLE, WPA_SUPPLICANT_TABLE, VER_INFO_TABLE)

@@ -155,7 +155,12 @@ class ToastManager:
         self.reposition()
 
     def reposition(self) -> None:
-        margin, y = 18, self._host.height() - 18 - 30  # leave room for status bar
+        try:
+            height = self._host.height()
+        except RuntimeError:  # the host window is being destroyed (its toasts with it)
+            self._toasts.clear()
+            return
+        margin, y = 18, height - 18 - 30  # leave room for status bar
         for toast in reversed(self._toasts):
             try:
                 toast.adjustSize()

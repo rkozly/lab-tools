@@ -62,8 +62,8 @@ class ParameterField(QWidget):
                 box.addItem("Enabled (1)", "1")
                 box.addItem("Disabled (0)", "0")
             else:
-                for c in p.choices:
-                    box.addItem(c, c)
+                for text, c in p.choice_items():
+                    box.addItem(text, c)
             box.setCurrentIndex(-1)
             box.setEnabled(not p.read_only)
             box.currentIndexChanged.connect(self._on_changed)

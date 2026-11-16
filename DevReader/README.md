@@ -122,6 +122,12 @@ Tick **Write to all selected devices** to apply the same values to every checked
 
 DevReader refuses to *add* an option that does not already exist in the file. This protects against writing to the wrong section by mistake. DevReader also never restarts services by itself; see `post_write_commands` below.
 
+### Enable / disable radios and interfaces
+
+The **/etc/config/wireless (disabled)** tab shows every `option disabled` in the wireless file. These are the same lines that `uci show wireless | grep disabled` prints. There is one column per section, named as `uci show` names it (`wifi0`, `@wifi-device[0]`, `@wifi-iface[1]`, …). The columns come from each device's file after **Read All**. A section that exists only on the AP is left empty for the CPEs. Hover over a cell to see its full `wireless.<section>.disabled` path and the section's `device`/`mode`.
+
+Double-click a cell and pick **0 (enabled)** or **1 (disabled)**, then click **Write Changes**. The write uses the same backup / push / verify pipeline as above. The new value takes effect the next time the wireless config is applied (for example `wifi` or a reboot).
+
 ## Logging
 
 The log panel shows the timestamp, level, device, message, command and result/error for every operation.
@@ -165,11 +171,28 @@ The editor builds its controls from these definitions. Supported fields:
 | `type` | `int`, `float`, `string`, `choice`, `bool` |
 | `min` / `max` | Numeric range |
 | `choices` | For `choice` |
+| `choice_labels` | Optional drop-down text for each choice, in the same order |
 | `pattern` | Regex the value must fully match |
 | `group` | Groups fields under a heading |
 | `unit`, `description`, `placeholder` | UI hints |
 | `read_only` | Show the value but don't write it |
 | `required` | If `False`, a missing option is not reported |
+
+### Show every occurrence of an option
+
+To get a tab with one column per section that has a given option, use a `TableDef` with `discover` instead of fixed `columns`. This is how the `disabled` tab is defined:
+
+```python
+WIRELESS_DISABLED_TABLE = TableDef(
+    id="wireless_disabled_table",
+    remote_path="/etc/config/wireless",
+    tab_title="/etc/config/wireless (disabled)",
+    discover=DiscoveredColumns(key="disabled", type=ParamType.CHOICE, choices=("0", "1"),
+                               choice_labels=("0 (enabled)", "1 (disabled)")),
+)
+```
+
+Cells whose parameter has `choices` are edited with a drop-down. `choice_labels` sets the text shown in the list.
 
 ### Add a configuration file
 

@@ -37,6 +37,8 @@ class ParameterDef:
     minimum: float | None = None
     maximum: float | None = None
     choices: tuple[str, ...] = ()
+    # Optional drop-down text per choice, same order as ``choices`` (e.g. "1 (disabled)").
+    choice_labels: tuple[str, ...] = ()
     pattern: str | None = None
     placeholder: str = ""
     read_only: bool = False
@@ -52,8 +54,9 @@ class ParameterDef:
         data = dict(data)
         if "type" in data:
             data["type"] = ParamType(data["type"])
-        if "choices" in data:
-            data["choices"] = tuple(str(c) for c in data["choices"])
+        for name in ("choices", "choice_labels"):
+            if name in data:
+                data[name] = tuple(str(c) for c in data[name])
         for alias, real in (("min", "minimum"), ("max", "maximum")):
             if alias in data:
                 data[real] = data.pop(alias)
@@ -89,6 +92,11 @@ class ParameterDef:
         if self.pattern and not re.fullmatch(self.pattern, value):
             raise ConfigValidationError(f"{self.label}: '{value}' has an invalid format")
         return value
+
+    def choice_items(self) -> list[tuple[str, str]]:
+        """``(display text, value)`` for each choice."""
+        labels = self.choice_labels if len(self.choice_labels) == len(self.choices) else self.choices
+        return list(zip(labels, self.choices))
 
     def _check_range(self, number: float) -> None:
         if self.minimum is not None and number < self.minimum:

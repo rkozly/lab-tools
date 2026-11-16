@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
+    QAbstractItemDelegate,
     QAbstractItemView,
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -16,13 +19,52 @@ from PySide6.QtWidgets import (
 )
 
 from devreader.config.parameters import ParameterDef
-from devreader.config.table import AP_NAME, Cell, TableDef, TableRead
+from devreader.config.table import AP_NAME, Cell, Column, TableDef, TableRead, merge_columns
 from devreader.core.discovery import Device
 from devreader.core.errors import ConfigValidationError
 from devreader.gui.theme import COLORS
 from devreader.gui.widgets import Badge, button
 
 FIXED = ["Device", "Serial"]
+
+
+class ChoiceDelegate(QStyledItemDelegate):
+    """Drop-down editor for cells whose parameter has fixed choices (e.g. 0 / 1); text editor otherwise."""
+
+    def __init__(self, panel: "ConfigTablePanel") -> None:
+        super().__init__(panel.table)
+        self._panel = panel
+
+    def createEditor(self, parent, option, index):
+        param = self._panel.param_at(index.row(), index.column())
+        if param is None or not param.choices:
+            return super().createEditor(parent, option, index)
+        box = QComboBox(parent)
+        for text, value in param.choice_items():
+            box.addItem(text, value)
+        box.activated.connect(lambda _i, b=box: self._commit(b))
+        QTimer.singleShot(0, box, box.showPopup)  # open the list right away: one double-click to pick
+        return box
+
+    def setEditorData(self, editor, index):
+        if not isinstance(editor, QComboBox):
+            return super().setEditorData(editor, index)
+        value = (index.data(Qt.EditRole) or "").strip()
+        i = editor.findData(value)
+        if i < 0 and value:  # unexpected device value: keep it selectable so "no change" is possible
+            editor.addItem(f"{value} (device value)", value)
+            i = editor.count() - 1
+        editor.setCurrentIndex(i)
+
+    def setModelData(self, editor, model, index):
+        if not isinstance(editor, QComboBox):
+            return super().setModelData(editor, model, index)
+        if editor.currentIndex() >= 0:
+            model.setData(index, editor.currentData(), Qt.EditRole)
+
+    def _commit(self, box: QComboBox) -> None:
+        self.commitData.emit(box)
+        self.closeEditor.emit(box, QAbstractItemDelegate.NoHint)
 
 
 class ConfigTablePanel(QWidget):
@@ -38,17 +80,18 @@ class ConfigTablePanel(QWidget):
         self._status: dict[str, tuple[str, bool | None]] = {}
         self._busy = False
         self._rendering = False
-        self._col_ids = [c.id for c in table.columns]
-        self._status_col = len(FIXED) + len(table.columns)
+        # Fixed tables: table.columns. Discovered tables: union of the columns found per device.
+        self._columns: list[Column] = list(table.columns)
+        self._discovered: dict[str, tuple[Column, ...]] = {}  # serial -> columns in that device's file
+        self._col_ids: list[str] = []
+        self._status_col = 0
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 8, 0, 0)
         lay.setSpacing(10)
 
-        self.table = QTableWidget(0, self._status_col + 1)
-        self.table.setHorizontalHeaderLabels(FIXED + [c.label for c in table.columns] + ["Status"])
-        for i, c in enumerate(table.columns, start=len(FIXED)):
-            self.table.horizontalHeaderItem(i).setToolTip(c.tooltip)
+        self.table = QTableWidget(0, 0)
+        self.table.setItemDelegate(ChoiceDelegate(self))
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
@@ -56,14 +99,18 @@ class ConfigTablePanel(QWidget):
         self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(32)
-        hh = self.table.horizontalHeader()
-        hh.setHighlightSections(False)
-        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(self._status_col, QHeaderView.Stretch)
+        self.table.horizontalHeader().setHighlightSections(False)
+        self._apply_columns()
         self.table.itemChanged.connect(self._on_item_changed)
         lay.addWidget(self.table, 1)
 
-        hint = QLabel("Double-click a cell to edit. Edited cells are highlighted; only they are written. "
+        if table.discover is not None:
+            key = table.discover.key
+            what = f"Columns = 'uci show {table.config_name} | grep {key}', filled by Read All. "
+            edit = "Double-click a cell to pick a value. " if table.discover.choices else ""
+        else:
+            what, edit = "", "Double-click a cell to edit. "
+        hint = QLabel(f"{what}{edit}Edited cells are highlighted; only they are written. "
                       "Empty cells do not exist in that device's file.")
         hint.setObjectName("Muted")
         hint.setWordWrap(True)
@@ -110,6 +157,11 @@ class ConfigTablePanel(QWidget):
         edits.pop(result.serial, None)
         self._cells[result.serial] = result.cells
         self._status[result.serial] = ("Read OK", True)
+        if self.table_def.discover is not None:
+            self._discovered[result.serial] = result.columns
+            self._update_discovered_columns()
+            if not result.cells:
+                self._status[result.serial] = (f"No 'option {self.table_def.discover.key}' in the file", None)
         self._render(keep=edits)
 
     def set_row_status(self, serial: str, text: str, ok: bool | None) -> None:
@@ -165,7 +217,7 @@ class ConfigTablePanel(QWidget):
                     item.setFont(f)
                 self.table.setItem(row, c, item)
             cells = self._cells.get(dev.serial)
-            for i, col in enumerate(self.table_def.columns, start=len(FIXED)):
+            for i, col in enumerate(self._columns, start=len(FIXED)):
                 cell = cells.get(col.id) if cells else None
                 editable = (cell is not None and cell.param is not None and not cell.param.read_only
                             and not self.table_def.read_only)
@@ -174,7 +226,7 @@ class ConfigTablePanel(QWidget):
                 flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
                 if editable:
                     flags |= Qt.ItemIsEditable
-                    item.setToolTip(f"{cell.param.section}.{cell.param.key}")
+                    item.setToolTip(cell.info or f"{cell.param.section}.{cell.param.key}")
                 elif cells is not None and (cell is None or cell.param is None):
                     item.setToolTip("Not present on this device")
                 item.setFlags(flags)
@@ -187,6 +239,27 @@ class ConfigTablePanel(QWidget):
             self._set_status_item(row, dev.serial)
         self._rendering = False
         self._update_state()
+
+    def _apply_columns(self) -> None:
+        """Rebuild the header from ``self._columns``. Cells are filled by the next ``_render``."""
+        self._col_ids = [c.id for c in self._columns]
+        self._status_col = len(FIXED) + len(self._columns)
+        self.table.setColumnCount(self._status_col + 1)
+        self.table.setHorizontalHeaderLabels(FIXED + [c.label for c in self._columns] + ["Status"])
+        for i, c in enumerate(self._columns, start=len(FIXED)):
+            self.table.horizontalHeaderItem(i).setToolTip(c.tooltip)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(self._status_col, QHeaderView.Stretch)
+
+    def _update_discovered_columns(self) -> None:
+        # Listed devices first (AP on top), so the column order does not depend on which read finished first.
+        order = [d.serial for d in self._devices if d.serial in self._discovered]
+        order += [s for s in self._discovered if s not in order]
+        columns = merge_columns(*(self._discovered[s] for s in order))
+        if [c.id for c in columns] != self._col_ids:
+            self._columns = columns
+            self._apply_columns()
 
     def _set_status_item(self, row: int, serial: str) -> None:
         text, ok = self._status.get(serial, ("", None))
@@ -242,6 +315,14 @@ class ConfigTablePanel(QWidget):
                 if cell and cell.param and item and item.text().strip() != (cell.value or ""):
                     out.setdefault(serial, {})[col_id] = item.text().strip()
         return out
+
+    def param_at(self, row: int, column: int) -> ParameterDef | None:
+        """Parameter shown in a value cell, or None (fixed/status column, or not on that device)."""
+        head = self.table.item(row, 0)
+        if head is None or not len(FIXED) <= column < self._status_col:
+            return None
+        cell = self._cells.get(head.data(Qt.UserRole), {}).get(self._col_ids[column - len(FIXED)])
+        return cell.param if cell else None
 
     def _row_of(self, serial: str) -> int | None:
         for row in range(self.table.rowCount()):
