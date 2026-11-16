@@ -16,6 +16,16 @@ import sys
 
 from ..core.models import BackboneConfig, ConnectSpec, DeviceConfig
 
+LAB_PASS_ENV = "LABHUB_SSH_PASS"   # the BB password from Mappings, for the ssh helper
+_lab_password = ""
+
+
+def set_ssh_password(password: str) -> None:
+    """BB password from the lab file (Mappings); empty = $ssh_pass, else the default."""
+    global _lab_password
+    _lab_password = password or ""
+
+
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
@@ -172,6 +182,10 @@ def child_env() -> dict:
     env = dict(os.environ)
     env["PYTHONPATH"] = APP_ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    if _lab_password:
+        env[LAB_PASS_ENV] = _lab_password
+    else:
+        env.pop(LAB_PASS_ENV, None)
     return env
 
 

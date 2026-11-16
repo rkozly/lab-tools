@@ -78,6 +78,26 @@ def parse_inet6(out: str) -> tuple[list[str], list[str]]:
     return glob, link
 
 
+_IFC_HEAD = re.compile(r"^([^\s:]+(?::\d+)?):?\s+(?:flags=|Link encap)")
+_GLOBAL_NEW = re.compile(r"^\s*inet6\s+([0-9a-fA-F:]+)\s+prefixlen\s+(\d+).*<global>\s*$")
+_GLOBAL_OLD = re.compile(r"^\s*inet6 addr:\s*([0-9a-fA-F:]+)/(\d+)\s+Scope:Global", re.I)
+
+
+def parse_globals(out: str) -> list[tuple[str, str]]:
+    """`ifconfig` -> [(interface, "addr/prefixlen")] of the global IPv6 addresses
+    ('inet6 2008:db9::20  prefixlen 64  scopeid 0x0<global>'; old style 'Scope:Global' too)."""
+    found, iface = [], ""
+    for line in out.splitlines():
+        h = _IFC_HEAD.match(line)
+        if h:
+            iface = h.group(1)
+            continue
+        m = _GLOBAL_NEW.match(line) or _GLOBAL_OLD.match(line)
+        if m:
+            found.append((iface, f"{m.group(1)}/{m.group(2)}"))
+    return found
+
+
 def lookup(found: dict[str, IfaceAddr], name: str) -> IfaceAddr:
     """Interface by name, case-insensitive (CPE1.960 = cpe1.960)."""
     return found.get(name.lower()) or IfaceAddr(name, False)
@@ -166,6 +186,13 @@ class BbExecDone(Event):
 
 
 @dataclass
+class BbGlobals(Event):
+    node_id: str                 # backbone
+    addrs: list                  # [(interface, "addr/prefixlen")]
+    error: str = ""
+
+
+@dataclass
 class BbPeerAddr(Event):
     node_id: str                 # BB whose shell gets the command
     key: str                     # quick command key
@@ -232,6 +259,19 @@ class BbNetService:
             except tr.TransportError as e:
                 code, out = 255, str(e)
             self.bus.publish(BbExecDone(node.id, key, code, out))
+        self._bg(work)
+
+    def read_globals(self, node) -> None:
+        """Global IPv6 addresses of a BB (`ifconfig`, inside its namespace if it has one)."""
+        def work():
+            try:
+                code, out = run(self._spec(node), "ifconfig 2>&1")
+            except tr.TransportError as e:
+                self.bus.publish(BbGlobals(node.id, [], str(e)))
+                return
+            addrs = parse_globals(out)
+            err = "" if addrs or code == 0 else (out.splitlines()[-1] if out else f"exit {code}")
+            self.bus.publish(BbGlobals(node.id, addrs, err))
         self._bg(work)
 
     def peer_addr(self, node, key: str, peer_bb, peer: str, iface: str) -> None:

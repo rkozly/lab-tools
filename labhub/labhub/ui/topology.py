@@ -1,11 +1,23 @@
 """
 Topology tab: every device and backbone as a card, with its interfaces
 drawn as a tree (child under its father: br-lan -> eth0 / ath0, wifi0 ->
-ath0, eth0 -> eth0.960). A device is joined to its backbone by a line to
-the BB interfaces from Mappings. Click an interface to see its config.
+ath0, eth0 -> eth0.960). Lines between the nodes:
+
+  cable   (purple)        the device's port (eth0) -> the BB interface its VLANs sit on (AP, CPE1)
+  VLAN    (cyan = control .960, green = data)
+                          the same VLAN on both ends, by VLAN ids: eth0.960 <-> AP.960,
+                          eth0.1037.1015 <-> v10371015 (on AP.1037: 1037.1015); a mapped BB
+                          interface without a match on the device -> from the device's bridge
+  route   (amber, dots)   a BB route (ip -6 route) through one of its interfaces: to the
+                          interface on another BB that has the destination address, else a tag
+
+Click an interface to see its config.
 """
 
 from __future__ import annotations
+
+import ipaddress
+import re
 
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
@@ -20,6 +32,10 @@ CARD_W = PILL_W + 4 * INDENT + 2 * CARD_PAD
 COL_GAP, ROW_GAP = 230, 40
 KIND_ICON = {"bridge": "⛓", "bond": "⛓", "wireless": "📶", "vlan": "⑂", "virtual": "◇", "loopback": "↺"}
 GREEN, RED, BLUE, MUTED = "#3ccf7a", "#ff6b7a", "#2f6fed", "#8a90a0"
+CABLE, ROUTE = "#c678dd", "#f0b43c"
+CONTROL, DATA = "#56d4dd", "#3ccf7a"     # VLAN wires: control (960) cyan, data (1037 / 1015 ...) green
+CONTROL_VLAN = "960"
+_SKIP_ROUTE_KINDS = {"local", "multicast", "broadcast", "anycast", "throw", "nat"}
 
 
 class IfacePill(QGraphicsObject):
@@ -126,6 +142,11 @@ class TopologyView(QWidget):
         self.hide_down.setToolTip("Hide interfaces that are down (and have nothing up under them)")
         self.hide_down.toggled.connect(lambda _on: self.redraw())
         bar.addWidget(self.hide_down)
+        self.show_routes = QCheckBox("Routes")
+        self.show_routes.setChecked(True)
+        self.show_routes.setToolTip("Draw the backbones' IPv6 routes (amber dotted lines)")
+        self.show_routes.toggled.connect(lambda _on: self.redraw())
+        bar.addWidget(self.show_routes)
         for text, fn in (("⊕", lambda: self.view.scale(1.15, 1.15)), ("⊖", lambda: self.view.scale(1 / 1.15, 1 / 1.15)),
                          ("Fit", self.fit)):
             b = QPushButton(text)
@@ -168,6 +189,7 @@ class TopologyView(QWidget):
         self.errors: dict[str, str] = {}
         self.links: dict[str, list[str]] = {}  # device id -> its interfaces on the BB
         self.pills: dict[tuple[str, str], IfacePill] = {}
+        self.routes: dict[str, list] = {}      # backbone id -> [bbnet.Route] (ip -6 route)
         self._sel: tuple[str, str] | None = None
         self._fitted = False
 
@@ -187,6 +209,10 @@ class TopologyView(QWidget):
         self.errors[node_id] = error
         if error and not ifaces:
             self.data.pop(node_id, None)
+        self.redraw()
+
+    def set_routes(self, node_id: str, routes: list) -> None:
+        self.routes[node_id] = list(routes)
         self.redraw()
 
     def set_error(self, node_id: str, error: str) -> None:
@@ -300,41 +326,207 @@ class TopologyView(QWidget):
                 bh = self._card(bb, CARD_W + COL_GAP, y)
                 bb_y[bid] = (y, bh)
                 y += bh + ROW_GAP
-        # device -> its interfaces on the BB
+        # device -> its BB, interface to interface (see the top of the file)
         for d in devices:
             bid = d.linked[0] if d.linked else None
             if bid not in bb_y:
                 continue
-            dy, dh = dev_box[d.id]
-            start_y = dy + HEAD_H / 2
-            names = self.links.get(d.id, [])
-            targets = []
-            for name in names:
-                pill = self.pills.get((bid, name)) or next(
-                    (p for (n, i), p in self.pills.items() if n == bid and i.lower() == name.lower()), None)
-                if pill is not None:
-                    pill.highlight = True
-                    targets.append((pill.scenePos().y() + (ROW_H - 6) / 2, pill.ia.name, True))
-                else:
-                    targets.append((None, name, False))
-            if not any(t[0] is not None for t in targets):
-                targets = [(bb_y[bid][0] + HEAD_H / 2, " / ".join(names) or "backbone", False)]
-            for ty, name, found in targets:
-                ty = ty if ty is not None else bb_y[bid][0] + HEAD_H / 2
-                x0, x1 = CARD_W, CARD_W + COL_GAP
-                path = QPainterPath()
-                path.moveTo(x0, start_y)
-                path.cubicTo(x0 + COL_GAP / 2, start_y, x1 - COL_GAP / 2, ty, x1, ty)
-                color = GREEN if found else MUTED
-                pen = QPen(QColor(c(color)), 1.6, Qt.SolidLine if found else Qt.DashLine)
-                self.scene.addPath(path, pen).setZValue(0)
-                label = self.scene.addSimpleText(name, QFont("Consolas", 8))
-                label.setBrush(QColor(c(color)))
-                label.setPos(x1 - label.boundingRect().width() - 6, ty - 15)
+            self._device_wires(d, bid, dev_box[d.id][0], bb_y[bid][0])
+        if self.show_routes.isChecked():
+            self._route_lines(list(bbs))
         self.scene.setSceneRect(self.scene.itemsBoundingRect().adjusted(-20, -20, 20, 20))
         if not self._fitted and self.data:
             self._fitted = True
             self.fit()
+
+    # --- wires --------------------------------------------------------------
+
+    def _chains(self, node_id: str) -> dict[str, tuple[str, ...]]:
+        """iface -> its VLAN ids, outermost first: eth0.1037.1015 -> (1037, 1015); a name without
+        a dot takes the digits after its father's: v10371015 on AP.1037 -> (1037, 1015)."""
+        by = {i.name: i for i in self.data.get(node_id, [])}
+        memo: dict[str, tuple[str, ...]] = {}
+
+        def chain(name: str, seen=()) -> tuple[str, ...]:
+            if name in memo:
+                return memo[name]
+            ia = by.get(name)
+            lower = ia.lower[0] if ia and ia.lower else ""
+            base = chain(lower, seen + (name,)) if lower and lower not in seen else ()
+            own = ()
+            m = re.search(r"\.(\d+)$", name)
+            if m:
+                own = (m.group(1),)
+            elif lower:
+                digits = "".join(ch for ch in name if ch.isdigit())
+                prefix = "".join(base)
+                if digits and prefix and digits.startswith(prefix) and len(digits) > len(prefix):
+                    own = (digits[len(prefix):],)
+            memo[name] = base + own
+            return memo[name]
+
+        return {n: chain(n) for n in by}
+
+    def _device_wires(self, d, bid: str, dy: float, by: float) -> None:
+        bridge, port = self._uplink(d.id)
+        dev_chain = {c: n for n, c in self._chains(d.id).items() if c and (d.id, n) in self.pills}
+        bb_chain = self._chains(bid)
+        done = set()
+        # VLAN <-> the same VLAN
+        for name, ch in bb_chain.items():
+            dev_name = dev_chain.get(ch) if ch else None
+            bb_pill = self.pills.get((bid, name))
+            if dev_name and bb_pill is not None:
+                src = self.pills[(d.id, dev_name)]
+                src.highlight = bb_pill.highlight = True
+                kind = "control" if CONTROL_VLAN in ch else "data"
+                self._wire(self._right(src), self._left(bb_pill), CONTROL if kind == "control" else DATA, 1.8, False,
+                           f"{kind} VLAN {'.'.join(ch)}")
+                done.add(name.lower())
+        # mapped BB interfaces with no VLAN of their own on the device: from the device's bridge
+        names = self.links.get(d.id, [])
+        src = self.pills.get((d.id, bridge or port or ""))
+        start = self._right(src) if src else (CARD_W, dy + HEAD_H / 2)
+        missing = []
+        for name in names:
+            pill = self._bb_pill(bid, name)
+            if pill is None:
+                missing.append(name)
+                continue
+            pill.highlight = True
+            if pill.ia.name.lower() in done:
+                continue
+            if src:
+                src.highlight = True
+            control = CONTROL_VLAN in bb_chain.get(pill.ia.name, ()) or pill.ia.name.endswith("." + CONTROL_VLAN)
+            self._wire(start, self._left(pill), CONTROL if control else DATA, 1.6, False,
+                       f"{'control' if control else 'data'}  {pill.ia.name}")
+        if missing and len(missing) == len(names):
+            self._wire(start, (CARD_W + COL_GAP, by + HEAD_H / 2), MUTED, 1.4, True, " / ".join(missing))
+        # the cable: device port -> the BB interface the mapped VLANs hang from
+        phys = next((p for p in (self._bb_pill(bid, n) for n in names) if p is not None), None)
+        while phys is not None and phys.ia.father and (bid, phys.ia.father) in self.pills:
+            phys = self.pills[(bid, phys.ia.father)]       # up to the root (AP.1037 -> AP)
+        port_pill = self.pills.get((d.id, port or ""))
+        if phys is not None and port_pill is not None:
+            port_pill.highlight = phys.highlight = True
+            self._wire(self._right(port_pill), self._left(phys), CABLE, 2.6, False, f"cable  {port} ↔ {phys.ia.name}")
+
+    def _route_lines(self, bb_ids: list[str]) -> None:
+        """Each BB route through a shown interface: to the BB interface that has the destination,
+        else a short tag "→ dest via gw"."""
+        owners = []                                   # (address, node id, iface)
+        for nid, ifaces in self.data.items():
+            for ia in ifaces:
+                for a in ia.ipv6:
+                    try:
+                        owners.append((ipaddress.ip_address(a.split("/")[0]), nid, ia.name))
+                    except ValueError:
+                        pass
+        bb_set = set(bb_ids)
+        right = CARD_W + COL_GAP + CARD_W             # right edge of the BB cards
+        lane = 0
+        tags: dict[tuple[str, str], int] = {}
+        pen = QPen(QColor(c(ROUTE)), 1.6, Qt.DotLine)
+        pen.setCapStyle(Qt.RoundCap)
+        for bid in bb_ids:
+            for r in self.routes.get(bid, []):
+                if r.kind in _SKIP_ROUTE_KINDS or not r.dev or r.dest.lower().startswith(("fe80", "ff")):
+                    continue
+                src = self._bb_pill(bid, r.dev)
+                if src is None:
+                    continue
+                try:
+                    net = ipaddress.ip_network("::/0" if r.dest == "default" else r.dest, strict=False)
+                except ValueError:
+                    continue
+                if net.version != 6:
+                    continue
+                # the prefix of an address on that very interface (the kernel's connected route): not drawn
+                if not r.via and any(nid == bid and name.lower() == r.dev.lower() and a in net and net.prefixlen < 128
+                                     for a, nid, name in owners):
+                    continue
+                hits = [(nid, name) for a, nid, name in owners
+                        if net.prefixlen > 0 and a in net and nid != bid]
+                target = next((self.pills.get(h) for h in hits if h[0] in bb_set and h in self.pills), None)
+                x0, y0 = self._right(src)
+                text = ("default" if r.dest == "default" else r.dest) + (f" via {r.via}" if r.via else "")
+                if target is not None:
+                    x1, y1 = self._right(target)
+                    xf = right + 40 + 18 * lane
+                    lane += 1
+                    path = QPainterPath()
+                    path.moveTo(x0, y0)
+                    path.cubicTo(xf, y0, xf, y1, x1, y1)
+                    self.scene.addPath(path, pen).setZValue(0)
+                    self._arrow(x1, y1)
+                    t = self.scene.addSimpleText(f"route {text}", QFont("Consolas", 8))
+                    t.setBrush(QColor(c(ROUTE)))
+                    t.setPos(xf - 24, (y0 + y1) / 2 - 7)
+                    t.setZValue(3)
+                else:
+                    k = tags.get((bid, src.ia.name), 0)
+                    tags[(bid, src.ia.name)] = k + 1
+                    owner = next((f" (on {self._name(h[0])} {h[1]})" for h in hits), "")
+                    ty = y0 + k * 13
+                    path = QPainterPath()
+                    path.moveTo(x0, y0)
+                    path.cubicTo(x0 + 30, y0, x0 + 30, ty, right + 30, ty)
+                    self.scene.addPath(path, pen).setZValue(0)
+                    t = self.scene.addSimpleText(f"→ {text}{owner}", QFont("Consolas", 8))
+                    t.setBrush(QColor(c(ROUTE)))
+                    t.setPos(right + 34, ty - 7)
+                    t.setZValue(3)
+
+    def _arrow(self, x: float, y: float) -> None:
+        path = QPainterPath()
+        path.moveTo(x, y)
+        path.lineTo(x + 8, y - 4)
+        path.lineTo(x + 8, y + 4)
+        path.closeSubpath()
+        self.scene.addPath(path, QPen(Qt.NoPen), QBrush(QColor(c(ROUTE)))).setZValue(3)
+
+    def _name(self, node_id: str) -> str:
+        return next((n.name for n in self.nodes if n.id == node_id), node_id)
+
+    def _uplink(self, node_id: str) -> tuple[str, str]:
+        """(bridge, port) of a device toward its BB: the bridge (br-lan first) and its UP
+        ethernet member (eth0); without a bridge, the first UP eth*."""
+        ifaces = self.data.get(node_id, [])
+        bridges = sorted((i for i in ifaces if i.kind == "bridge"), key=lambda i: (i.name != "br-lan", i.name))
+        for br in bridges:
+            members = [i for i in ifaces if i.master == br.name and i.name.startswith("eth")]
+            members.sort(key=lambda i: (i.state != "up", i.name))
+            if members:
+                return br.name, members[0].name
+        eth = sorted((i for i in ifaces if i.name.startswith("eth") and not i.kind),
+                     key=lambda i: (i.state != "up", i.name))
+        return (bridges[0].name if bridges else ""), (eth[0].name if eth else "")
+
+    def _bb_pill(self, bid: str, name: str):
+        return self.pills.get((bid, name)) or next(
+            (p for (n, i), p in self.pills.items() if n == bid and i.lower() == name.lower()), None)
+
+    @staticmethod
+    def _right(pill) -> tuple[float, float]:
+        return pill.scenePos().x() + pill.w, pill.scenePos().y() + (ROW_H - 6) / 2
+
+    @staticmethod
+    def _left(pill) -> tuple[float, float]:
+        return pill.scenePos().x(), pill.scenePos().y() + (ROW_H - 6) / 2
+
+    def _wire(self, a: tuple[float, float], b: tuple[float, float], color: str, width: float,
+              dashed: bool, label: str) -> None:
+        (x0, y0), (x1, y1) = a, b
+        bend = max(60.0, (x1 - x0) / 2)
+        path = QPainterPath()
+        path.moveTo(x0, y0)
+        path.cubicTo(x0 + bend, y0, x1 - bend, y1, x1, y1)
+        self.scene.addPath(path, QPen(QColor(c(color)), width, Qt.DashLine if dashed else Qt.SolidLine)).setZValue(0)
+        text = self.scene.addSimpleText(label, QFont("Consolas", 8))
+        text.setBrush(QColor(c(color)))
+        text.setPos(x1 - text.boundingRect().width() - 6, y1 - 15)
+        text.setZValue(3)
 
     def fit(self) -> None:
         r = self.scene.itemsBoundingRect()

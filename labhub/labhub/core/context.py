@@ -13,6 +13,9 @@ import yaml
 from . import config as cfg
 from .bbnet import BbNetService
 from .license import LicenseService
+from .associate import DeviceReader
+from .traffic import TrafficService
+from .remote_hosts import RemoteHosts
 from .topology import TopologyService
 from .events import EventBus
 from .live import BeaconStore, PollerManager, SampleStore
@@ -67,6 +70,9 @@ class AppContext:
         self.reboots = RebootService(self.bus, self.registry, self.shells)
         self.bbnet = BbNetService(self.bus)
         self.license = LicenseService(self.bus)
+        self.traffic = TrafficService(self.bus)
+        self.devreader = DeviceReader(self.bus)
+        self.remote = RemoteHosts(self.bus)      # devices plugged into another PC (Mappings: Device host)
         self.topology = TopologyService(self.bus)
         self.samples = SampleStore(self.bus)
         self.beacons = BeaconStore(self.bus)
@@ -116,7 +122,10 @@ class AppContext:
             else:
                 self.user.set("last_lab", str(path))
         self.presets.load_layer("lab", lab.presets)
+        from ..transports.base import set_ssh_password
+        set_ssh_password(str((lab.features or {}).get("ssh_password") or ""))
         self.registry.set_lab(lab)
+        self._remote_devices()
 
     def save_lab(self, lab: Lab, path: str | Path | None = None) -> Path:
         if path is None and not lab.path:
@@ -143,7 +152,21 @@ class AppContext:
     def export_dir(self) -> Path:
         return Path(self.user.get("export_dir") or DEFAULT_EXPORT_DIR)
 
+    def _remote_devices(self) -> None:
+        """Tunnels to the PCs that have some of the devices (Mappings → Device host)."""
+        from ..transports import base as tr
+        from ..transports import ssh_exec
+        from .models import DeviceConfig
+        hosts = {}
+        for n in self.registry.nodes():
+            if isinstance(n.config, DeviceConfig) and n.config.extra.get("host"):
+                serial = self.registry.serial_of(n)
+                if serial:
+                    hosts[serial] = str(n.config.extra["host"])
+        self.remote.configure(hosts, lambda: tr._lab_password or ssh_exec.password())
+
     def shutdown(self) -> None:
+        self.remote.close()
         self.ramdumps.stop_watch()
         self.shells.close_all()
         self.pollers.stop_all()

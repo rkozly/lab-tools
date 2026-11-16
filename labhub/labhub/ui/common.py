@@ -36,6 +36,7 @@ DAY = {
     "#2c3039": "#d4d8e0", "#333844": "#c9ced8", "#3a3f4b": "#c4c9d3", "#46506a": "#9aa3b5",
     "#253354": "#cfdcff", "#2a2e38": "#ffffff", "#5b6170": "#9aa0ad", "#8a90a0": "#5f6675",
     "#cfd6e2": "#1f2430", "#d8dce4": "#1f2430", "#e8eaf0": "#1f2430", "#ffffff": "#ffffff",
+    "#fefefe": "#1f2430",   # bright text on the window (selected tab, titles): dark in day
     "#3a1f24": "#fde8ea", "#4a242b": "#fbd5da", "#6b2b35": "#e7a3ad", "#ff9aa5": "#c02d3f",
     "#2f6fed": "#2f6fed", "#3d7cf5": "#3d7cf5",
 }

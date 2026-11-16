@@ -30,7 +30,8 @@ import threading
 import time
 
 PASS_ENV = "ssh_pass"
-DEFAULT_PASSWORD = "Qibylab@Wi9i9Lab"   # lab backbones; $ssh_pass wins when set
+DEFAULT_PASSWORD = "Qibylab@Wi9i9Lab"   # lab backbones; Mappings (LABHUB_SSH_PASS), then $ssh_pass win
+LAB_PASS_ENV = "LABHUB_SSH_PASS"
 _PW_PROMPT = re.compile(rb"(?i)password[^\n]*:\s*$")
 _ROOT_PROMPT = re.compile(rb"#\s*$")
 _ANY_PROMPT = re.compile(rb"[$#>]\s*$")
@@ -40,7 +41,7 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 def password() -> str:
     from ..core.config import load_env
     env = {k.lower(): v for k, v in load_env().items()}
-    return env.get(PASS_ENV) or DEFAULT_PASSWORD
+    return os.environ.get(LAB_PASS_ENV) or env.get(PASS_ENV) or DEFAULT_PASSWORD
 
 
 def find_ssh() -> str | None:

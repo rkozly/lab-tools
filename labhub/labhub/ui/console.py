@@ -72,10 +72,10 @@ class CommandBar(QFrame):
                           "While a shell is open, Run and presets are typed into it.")
         shells.clicked.connect(lambda: self.open_shells.emit(self.targets()))
         row2.addWidget(shells)
-        reboot = QPushButton("⏻  Reboot")
-        reboot.setToolTip("Reboot the target devices.\n"
+        reboot = QPushButton("⏻  Reboot all")
+        reboot.setToolTip("Reboot every AP and CPE of the lab (never the backbones), whatever is selected.\n"
                           "A running menu (QCMAP_CLI) is left with Ctrl+C / Ctrl+Z first, then 'reboot' is typed.")
-        reboot.clicked.connect(lambda: self.reboot_requested.emit(self.targets()))
+        reboot.clicked.connect(lambda: self.reboot_requested.emit(["kind:device"]))
         row2.addWidget(reboot)
         stop = QPushButton("■  Stop all")
         stop.setObjectName("Danger")
@@ -298,7 +298,7 @@ class ShellPane(QFrame):
             b = QToolButton()
             b.setObjectName("Mini")
             b.setText("⟳")
-            b.setToolTip("Check the IPv6 addresses of the control (.960) / data (AP .1037, CPE .1015) interfaces again")
+            b.setToolTip("Check the IPv6 addresses of the control (.960) / data (AP v10371015, CPE .1015) interfaces again")
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(lambda: self.addr_refresh.emit(self.node_id))
             al.addWidget(b)

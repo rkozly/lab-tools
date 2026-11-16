@@ -519,7 +519,7 @@ class RamdumpPanel(QWidget):
         pull.setObjectName("Primary")
         pull.clicked.connect(lambda: self.pull_requested.emit(self.path.text().strip(), False))
         row.addWidget(pull)
-        clr = QPushButton("🗑 Clear folder")
+        clr = QPushButton("Clear folder")
         clr.setObjectName("Danger")
         clr.clicked.connect(lambda: self.clear_requested.emit(self.path.text().strip()))
         row.addWidget(clr)
@@ -572,6 +572,15 @@ def human(n: int) -> str:
     return str(n)
 
 
+def show_max_sta(label: QLabel, value: int | None, detail: str = "") -> None:
+    """Stations the AP license allows (QWES max_sta); None -> N/A in red."""
+    ok = value is not None
+    label.setText(f"  Max stations: {value if ok else 'N/A'}  ")
+    label.setStyleSheet(f"color: {'#3ccf7a' if ok else '#ff6b7a'}; font-weight: 600; background: transparent;")
+    if detail:
+        label.setToolTip(detail)
+
+
 class ApView(QWidget):
     scan_requested = Signal(bool, str)          # short?, value
     qcmap_requested = Signal(str, int, int)     # preset id, delay ms, settle ms
@@ -598,7 +607,7 @@ class ApView(QWidget):
         self.max_sta.setToolTip("max_sta from the AP's QWES lines:\ntail -f -n +1 /tmp/hostapd.txt | grep QWES")
         bar.addWidget(self.max_sta)
         self.set_max_sta(None)
-        b = QPushButton("🔑 Push license")
+        b = QPushButton("Push license")
         b.setToolTip("adb push of the license file (Mappings → AP license) to the AP")
         b.clicked.connect(self.license_push.emit)
         bar.addWidget(b)
@@ -813,12 +822,7 @@ class ApView(QWidget):
             self.results.takeItem(self.results.count() - 1)
 
     def set_max_sta(self, value: int | None, detail: str = "") -> None:
-        """Stations the license allows; None -> N/A in red."""
-        ok = value is not None
-        self.max_sta.setText(f"  Max stations: {value if ok else 'N/A'}  ")
-        self.max_sta.setStyleSheet(f"color: {'#3ccf7a' if ok else '#ff6b7a'}; font-weight: 600; background: transparent;")
-        if detail:
-            self.max_sta.setToolTip(detail)
+        show_max_sta(self.max_sta, value, detail)
 
     def set_shell(self, status: str, message: str = "") -> None:
         text, color = {"open": ("● AP shell connected", "#3ccf7a"),

@@ -5,7 +5,7 @@ QMainWindow::separator { background: #23262e; width: 4px; height: 4px; }
 QToolTip { background: #2a2e38; color: #e8eaf0; border: 1px solid #3a3f4b; padding: 4px; }
 
 QFrame#Toolbar, QFrame#CommandBar { background: #1c1f26; border-bottom: 1px solid #262a33; }
-QLabel#AppTitle { font-size: 12pt; font-weight: 600; color: #ffffff; }
+QLabel#AppTitle { font-size: 12pt; font-weight: 600; color: #fefefe; }
 QLabel#Muted, QLabel[muted="true"] { color: #8a90a0; }
 QLabel#Section { color: #8a90a0; font-weight: 600; letter-spacing: 1px; }
 
@@ -36,7 +36,7 @@ QComboBox QAbstractItemView { background: #1c1f26; border: 1px solid #333844; se
 
 QTabWidget::pane { border: none; border-top: 1px solid #262a33; }
 QTabBar::tab { background: transparent; color: #8a90a0; padding: 7px 16px; border: none; }
-QTabBar::tab:selected { color: #ffffff; border-bottom: 2px solid #2f6fed; }
+QTabBar::tab:selected { color: #fefefe; border-bottom: 2px solid #2f6fed; }
 QTabBar::tab:hover { color: #d8dce4; }
 
 QTreeWidget, QTableWidget, QListWidget {
@@ -75,7 +75,7 @@ QPlainTextEdit#PaneText { background: #101216; border: none; font-family: Consol
 
 /* monitor cards */
 QFrame#Card { background: #1c1f26; border: 1px solid #2c3039; border-radius: 10px; }
-QLabel#Metric { font-size: 15pt; font-weight: 600; color: #ffffff; background: transparent; }
+QLabel#Metric { font-size: 15pt; font-weight: 600; color: #fefefe; background: transparent; }
 QLabel#MetricLabel { color: #8a90a0; font-size: 8pt; background: transparent; }
 
 /* quick-command buttons on AP / CPE shells */

@@ -4,7 +4,11 @@ that is open in the Console (same devices as the Stats tab).
 
 The values come from a poller per device (the ap-stats / cpe-stats snapshot
 commands, once a second) - the same wifistats calls the Stats tab's watch runs,
-parsed instead of shown as text. Line charts scroll to the left as time passes.
+parsed instead of shown as text. Capture (per card, or Capture all) saves the
+card's charts as a PNG with a summary table under them: min / avg / max / last
+of every line, and per MCS bar chart the packets and the MCS used most. "Whole run" (default): the charts span from the
+first sample to now and get denser as time passes, the MCS bars count since the
+start; the 30 s .. 15 min choices scroll to the left instead.
 
   AP   TX / RX MCS (bars: packets per index in the last 60 s), per radio
        RX RSSI, pilot EVM 0/1, time between beacons, beacons heard;
@@ -22,15 +26,26 @@ import time
 from collections import deque
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from .common import c as tc
 
 COLORS = ["#4aa3ff", "#3ccf7a", "#f0b43c", "#c678dd", "#ff6b7a", "#56d4dd"]
-WINDOWS = ((30, "last 30 s"), (60, "last 1 min"), (120, "last 2 min"), (300, "last 5 min"), (900, "last 15 min"))
+WINDOWS = ((None, "whole run"), (30, "last 30 s"), (60, "last 1 min"), (120, "last 2 min"), (300, "last 5 min"),
+           (900, "last 15 min"))
 MCS_WINDOW_S = 60
+MAX_POINTS = 200_000          # per line: hours at one sample a second
+
+
+def _elapsed(sec: float) -> str:
+    sec = int(sec)
+    if sec < 120:
+        return f"{sec}s"
+    h, rem = divmod(sec, 3600)
+    m, s_ = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s_:02d}" if h else f"{m}:{s_:02d}"
 
 
 def _font(p: QPainter, size: float = 8) -> None:
@@ -46,7 +61,7 @@ class Chart(QWidget):
         super().__init__()
         self.title, self.unit, self.lo, self.hi = title, unit, lo, hi
         self.series: dict[str, list[tuple[float, float]]] = {}
-        self.window = 60.0
+        self.window: float | None = None      # None = whole run
         self.hint = "waiting for data…"
         self.setMinimumHeight(150)
 
@@ -55,8 +70,8 @@ class Chart(QWidget):
             return
         pts = self.series.setdefault(name, [])
         pts.append((t, float(v)))
-        if len(pts) > 4000:
-            del pts[:len(pts) - 4000]
+        if len(pts) > MAX_POINTS:
+            del pts[:len(pts) - MAX_POINTS]
 
     def clear(self) -> None:
         self.series.clear()
@@ -69,16 +84,25 @@ class Chart(QWidget):
         now = time.monotonic()
         r = QRectF(self.rect()).adjusted(50, 20, -10, -20)
         p.setPen(QColor(tc("#d8dce4")))
+        all_v = [v for s in self.series.values() for _t, v in s]
+        giga = self.unit == "Mbit/s" and all_v and max(all_v) >= 1000     # show Gbit/s from 1000 Mbit/s on
+        unit = "Gbit/s" if giga else self.unit
+        div = 1000.0 if giga else 1.0
         p.drawText(QRectF(8, 2, self.width() - 16, 16), Qt.AlignLeft | Qt.AlignVCenter,
-                   self.title + (f"  ({self.unit})" if self.unit else ""))
-        pts = {k: [(t, v) for t, v in s if now - t <= self.window + 2] for k, s in self.series.items()}
+                   self.title + (f"  ({unit})" if unit else ""))
+        whole = self.window is None
+        t_start = min((s[0][0] for s in self.series.values() if s), default=now)
+        span = max(now - t_start, 10.0) if whole else self.window
+        pts = self.series if whole else {k: [(t, v) for t, v in s if now - t <= span + 2]
+                                         for k, s in self.series.items()}
         vals = [v for s in pts.values() for _, v in s]
         x = self.width() - 10
         for i, name in reversed(list(enumerate(sorted(pts)))):
             if not pts[name]:
                 continue
             last = pts[name][-1][1]
-            txt = (f"● {name} {last:.1f}" if len(pts) > 1 else f"{last:.1f}")
+            shown = f"{last / div:.2f}" if giga else f"{last:.1f}"
+            txt = (f"● {name} {shown}" if len(pts) > 1 else shown)
             w = p.fontMetrics().horizontalAdvance(txt) + 12
             p.setPen(QColor(COLORS[i % len(COLORS)]))
             p.drawText(QRectF(x - w, 2, w, 16), Qt.AlignRight | Qt.AlignVCenter, txt)
@@ -101,7 +125,7 @@ class Chart(QWidget):
             hi += pad
 
         def X(t: float) -> float:
-            return r.right() - (now - t) / self.window * r.width()
+            return r.right() - (now - t) / span * r.width()
 
         def Y(v: float) -> float:
             return r.bottom() - (v - lo) / (hi - lo) * r.height()
@@ -113,13 +137,18 @@ class Chart(QWidget):
             p.drawLine(int(r.left()), int(y), int(r.right()), int(y))
             p.setPen(QColor(tc("#8a90a0")))
             p.drawText(QRectF(0, y - 8, 46, 16), Qt.AlignRight | Qt.AlignVCenter,
-                       f"{v:,.0f}" if abs(hi - lo) >= 20 else (f"{v:.1f}" if abs(hi - lo) >= 1 else f"{v:.3f}"))
-        step = next((s for s in (5, 10, 15, 30, 60, 120, 300) if s >= self.window / 6), 300)
+                       f"{v / div:.2f}" if giga else
+                       (f"{v:,.0f}" if abs(hi - lo) >= 20 else (f"{v:.1f}" if abs(hi - lo) >= 1 else f"{v:.3f}")))
+        step = next((s for s in (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200) if s >= span / 6), 14400)
         sec = 0
-        while sec <= self.window:
-            x = r.right() - sec / self.window * r.width()
+        while sec <= span + 0.01:
             p.setPen(QColor(tc("#8a90a0")))
-            p.drawText(QRectF(x - 30, r.bottom() + 3, 60, 14), Qt.AlignCenter, "now" if sec == 0 else f"-{sec}s")
+            if whole:                          # time since the first sample, left to right
+                x = r.left() + sec / span * r.width()
+                p.drawText(QRectF(x - 30, r.bottom() + 3, 60, 14), Qt.AlignCenter, _elapsed(sec))
+            else:
+                x = r.right() - sec / span * r.width()
+                p.drawText(QRectF(x - 30, r.bottom() + 3, 60, 14), Qt.AlignCenter, "now" if sec == 0 else f"-{sec}s")
             sec += step
         p.setClipRect(r)
         for i, name in enumerate(sorted(pts)):
@@ -127,9 +156,13 @@ class Chart(QWidget):
             if not s:
                 continue
             color = QColor(COLORS[i % len(COLORS)])
-            path = QPainterPath(QPointF(X(s[0][0]), Y(s[0][1])))
-            for t, v in s[1:]:
-                path.lineTo(QPointF(X(t), Y(v)))
+            cols: dict[int, list[float]] = {}  # one point (the mean) per pixel column: long runs stay fast
+            for t, v in s:
+                cols.setdefault(int(X(t)), []).append(v)
+            xs = sorted(cols)
+            path = QPainterPath(QPointF(xs[0], Y(sum(cols[xs[0]]) / len(cols[xs[0]]))))
+            for cx in xs[1:]:
+                path.lineTo(QPointF(cx, Y(sum(cols[cx]) / len(cols[cx]))))
             p.setPen(QPen(color, 1.8))
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
@@ -150,6 +183,8 @@ class McsBars(QWidget):
         super().__init__()
         self.title = title
         self.hist: dict[str, deque] = {}      # radio -> deque[(t, [counters])]
+        self.first: dict[str, tuple[float, list[int]]] = {}   # radio -> first sample (whole run)
+        self.window: float | None = None      # None = since the start, else the last MCS_WINDOW_S
         self.setMinimumHeight(170)
 
     def add(self, name: str, t: float, counters) -> None:
@@ -157,11 +192,13 @@ class McsBars(QWidget):
             return
         d = self.hist.setdefault(name, deque())
         d.append((t, list(counters)))
+        self.first.setdefault(name, (t, list(counters)))
         while d and t - d[0][0] > MCS_WINDOW_S + 5:
             d.popleft()
 
     def clear(self) -> None:
         self.hist.clear()
+        self.first.clear()
         self.update()
 
     def bars(self) -> dict[str, list[int]]:
@@ -171,7 +208,8 @@ class McsBars(QWidget):
         for name, d in self.hist.items():
             if not d:
                 continue
-            base = next(((t, c) for t, c in d if now - t <= MCS_WINDOW_S), d[0])
+            base = self.first.get(name, d[0]) if self.window is None else \
+                next(((t, c) for t, c in d if now - t <= MCS_WINDOW_S), d[0])
             cur = d[-1][1]
             n = max(len(cur), len(base[1]))
             b = base[1] + [0] * (n - len(base[1]))
@@ -179,7 +217,9 @@ class McsBars(QWidget):
             delta = [x - y for x, y in zip(cur, b)]
             if any(v < 0 for v in delta):      # counters were reset: count from the reset
                 delta = cur
-            if len(d) == 1:                     # one sample only: show nothing yet
+                if self.window is None:
+                    self.first[name] = (d[-1][0], [0] * n)
+            if len(d) == 1 and base[0] == d[-1][0]:   # one sample only: show nothing yet
                 delta = [0] * n
             out[name] = delta
         return out
@@ -190,7 +230,8 @@ class McsBars(QWidget):
         _font(p)
         p.setPen(QColor(tc("#d8dce4")))
         p.drawText(QRectF(8, 2, self.width() - 16, 16), Qt.AlignLeft | Qt.AlignVCenter,
-                   f"{self.title}  (packets per index, last {MCS_WINDOW_S} s)")
+                   f"{self.title}  (packets per index, "
+                   + ("since the start)" if self.window is None else f"last {MCS_WINDOW_S} s)"))
         r = QRectF(self.rect()).adjusted(56, 22, -10, -22)
         p.setPen(QPen(QColor(tc("#2c3039"))))
         p.drawRect(r)
@@ -199,7 +240,7 @@ class McsBars(QWidget):
         if not data or top <= 0:
             p.setPen(QColor(tc("#5b6170")))
             p.drawText(r, Qt.AlignCenter, "waiting for data…" if not any(len(d) > 1 for d in self.hist.values())
-                       else "no packets in the last 60 s")
+                       else ("no packets yet" if self.window is None else "no packets in the last 60 s"))
             return
         n = max(len(b) for b in data.values())
         names = sorted(data)
@@ -236,6 +277,10 @@ class McsBars(QWidget):
         for k in range(n):
             if n <= 20 or k % 2 == 0:
                 p.drawText(QRectF(r.left() + k * slot, r.bottom() + 3, slot, 14), Qt.AlignCenter, str(k))
+
+
+def _fmt_rate(mbps: float) -> str:
+    return f"{mbps / 1000:.2f} Gbit/s" if mbps >= 1000 else f"{mbps:.0f} Mbit/s"
 
 
 def _short(v: float) -> str:
@@ -277,6 +322,7 @@ class DeviceGraphs(QFrame):
 
     def __init__(self, title: str, role: str) -> None:
         super().__init__()
+        self.name = title
         self.setObjectName("Card")
         self.role = role
         v = QVBoxLayout(self)
@@ -289,6 +335,10 @@ class DeviceGraphs(QFrame):
         self.status.setObjectName("Muted")
         self.status.setStyleSheet("background: transparent;")
         head.addWidget(self.status, 1)
+        cap = QPushButton("Capture")
+        cap.setToolTip("Save this card's charts as a PNG, with a summary table (min / avg / max / last) under them")
+        cap.clicked.connect(self.capture_to_file)
+        head.addWidget(cap)
         b = QPushButton("⇩ CSV")
         b.setToolTip("Export the captured values of this device")
         b.clicked.connect(self.export)
@@ -327,9 +377,12 @@ class DeviceGraphs(QFrame):
     def widgets(self) -> list[QWidget]:
         return list(self.charts.values()) + list(self.mcs.values())
 
-    def set_window(self, sec: float) -> None:
+    def set_window(self, sec: float | None) -> None:
+        """None = whole run (charts from the first sample, MCS bars since the start)."""
         for ch in self.charts.values():
             ch.window = sec
+        for bars in self.mcs.values():
+            bars.window = None if sec is None else MCS_WINDOW_S
 
     def set_status(self, text: str, color: str = "#8a90a0") -> None:
         self.status.setText("   " + text)
@@ -425,6 +478,86 @@ class DeviceGraphs(QFrame):
         for w in self.widgets():
             w.clear()
 
+    # --- capture: the charts + a summary table ----------------------------------------
+
+    def summary(self) -> list[tuple[str, str, str, str, str, str]]:
+        """(what, min, avg, max, last, samples) per line; MCS bars: (what, packets, most used MCS, ...)."""
+        rows = []
+        for ch in self.charts.values():
+            for name, pts in sorted(ch.series.items()):
+                vals = [v for _t, v in pts]
+                if not vals:
+                    continue
+                what = ch.title + (f" – {name}" if name else "")
+                f = (lambda v: _fmt_rate(v)) if ch.unit == "Mbit/s" else (
+                    lambda v, u=ch.unit: (f"{v:.0f} {u}" if u == "count" else f"{v:.1f} {u}").strip())
+                rows.append((what, f(min(vals)), f(sum(vals) / len(vals)), f(max(vals)), f(vals[-1]), str(len(vals))))
+        for bars in self.mcs.values():
+            for radio, b in sorted(bars.bars().items()):
+                total = sum(b)
+                if total <= 0:
+                    continue
+                best = max(range(len(b)), key=lambda k: b[k])
+                scope = "since the start" if bars.window is None else f"last {MCS_WINDOW_S} s"
+                rows.append((f"{bars.title} – {radio} ({scope})", f"{_short(total)} packets", f"mostly MCS {best}",
+                             f"{100 * b[best] / total:.0f} % at MCS {best}", "", ""))
+        if self.stations is not None and self.stations.value.text() not in ("", "–"):
+            rows.append(("Connected stations", self.stations.value.text(), "", "", "", self.stations.detail.text()))
+        return rows
+
+    def capture(self) -> QImage:
+        """The card as it is on screen, with the summary table drawn under it."""
+        shot = self.grab()
+        rows = self.summary()
+        row_h, pad = 24, 14
+        heads = ("", "min", "avg", "max", "last", "samples")
+        w = shot.width()
+        h = shot.height() + pad * 3 + row_h * (len(rows) + 1) + 20
+        img = QImage(w, h, QImage.Format_ARGB32)
+        img.fill(QColor(tc("#16181d")))
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.drawPixmap(0, 0, shot)
+        top = shot.height() + pad * 2
+        f = QFont(p.font())
+        f.setPointSizeF(9)
+        bold = QFont(f)
+        bold.setBold(True)
+        p.setFont(bold)
+        p.setPen(QColor(tc("#d8dce4")))
+        p.drawText(QRectF(pad, top - pad - 4, w - 2 * pad, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"{self.name} – summary")
+        first = max(260.0, (w - 2 * pad) * 0.34)
+        rest = (w - 2 * pad - first) / (len(heads) - 1)
+        xs = [pad, pad + first] + [pad + first + rest * i for i in range(1, len(heads))]
+        p.setPen(QPen(QColor(tc("#2c3039"))))
+        for r in range(len(rows) + 2):
+            y = top + r * row_h
+            p.drawLine(QPointF(pad, y), QPointF(w - pad, y))
+        for x in xs + [w - pad]:
+            p.drawLine(QPointF(x, top), QPointF(x, top + row_h * (len(rows) + 1)))
+        p.setPen(QColor(tc("#d8dce4")))
+        for i, hd in enumerate(heads):
+            p.drawText(QRectF(xs[i] + 8, top, (first if i == 0 else rest) - 10, row_h),
+                       (Qt.AlignLeft if i == 0 else Qt.AlignCenter) | Qt.AlignVCenter, hd)
+        p.setFont(f)
+        for r, row in enumerate(rows, 1):
+            y = top + r * row_h
+            for i, cell in enumerate(row):
+                p.setPen(QColor(tc("#d8dce4" if i == 0 else "#8ab4ff")))
+                width = (first if i == 0 else rest) - 10
+                p.drawText(QRectF(xs[i] + 8, y, width, row_h), (Qt.AlignLeft if i == 0 else Qt.AlignCenter) | Qt.AlignVCenter,
+                           p.fontMetrics().elidedText(cell, Qt.ElideRight, int(width)))
+        p.end()
+        return img
+
+    def capture_to_file(self) -> None:
+        from datetime import datetime
+        name = f"{self.name}_{datetime.now():%Y%m%d_%H%M%S}.png".replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(self, "Save capture", name, "PNG image (*.png)")
+        if path:
+            self.capture().save(path)
+
     def export(self) -> None:
         if not self.rows:
             return
@@ -452,10 +585,15 @@ class GraphsView(QWidget):
         self.window = QComboBox()
         for sec, label in WINDOWS:
             self.window.addItem(label, sec)
-        self.window.setCurrentIndex(1)
-        self.window.setToolTip("Time shown by the line charts (MCS bars always show the last 60 s)")
+        self.window.setCurrentIndex(0)
+        self.window.setToolTip("Whole run: everything since the graphs started (MCS bars since the start too).\n"
+                               "Last …: a window that scrolls (MCS bars: the last 60 s).")
         self.window.currentIndexChanged.connect(self._window)
         bar.addWidget(self.window)
+        b = QPushButton("Capture all")
+        b.setToolTip("Save every card (charts + summary table) as a PNG into a folder")
+        b.clicked.connect(self.capture_all)
+        bar.addWidget(b)
         b = QPushButton("Clear")
         b.clicked.connect(self.clear)
         bar.addWidget(b)
@@ -491,15 +629,27 @@ class GraphsView(QWidget):
 
     def _window(self) -> None:
         for card in self.cards.values():
-            card.set_window(float(self.window.currentData()))
+            card.set_window(self.window.currentData())
 
     def card(self, device_id: str, title: str, role: str) -> DeviceGraphs:
         c = self.cards.get(device_id)
         if c is None:
             c = DeviceGraphs(title, role)
-            c.set_window(float(self.window.currentData()))
+            c.set_window(self.window.currentData())
             self.cards[device_id] = c
         return c
+
+    def capture_all(self) -> None:
+        from datetime import datetime
+        from pathlib import Path
+        if not self.cards:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Save the captures into")
+        if not folder:
+            return
+        stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+        for card in self.cards.values():
+            card.capture().save(str(Path(folder) / f"{card.name}_{stamp}.png".replace(" ", "_")))
 
     def remove(self, device_id: str) -> None:
         c = self.cards.pop(device_id, None)

@@ -104,22 +104,61 @@ exit /b 0
 
 :ensure_venv
 if exist "%PY%" (
-    "%PY%" -c "import sys" >nul 2>&1 && exit /b 0
-    echo Existing environment does not run ^(Python was updated or removed^) - recreating...
+    REM keep it only if it runs, has pip, and was not built from the Microsoft Store Python
+    "%SYS%\findstr.exe" /i "WindowsApps" "%VENV%\pyvenv.cfg" >nul 2>&1 || (
+        "%PY%" -m pip --version >nul 2>&1 && exit /b 0
+    )
+    echo Existing environment is broken or uses the Microsoft Store Python - recreating...
     rmdir /s /q "%VENV%"
 )
 echo Creating virtual environment in %VENV% ...
-py -3 -m venv "%VENV%" 2>nul || python -m venv "%VENV%" || (
-    echo ERROR: no Python found. Install Python 3.11+ from https://www.python.org/downloads/
-    echo        ^(tick "Add python.exe to PATH"^) and run LabHub.bat again.
+REM The Python that builds the venv: 3.12 first; never the Microsoft Store one (...\WindowsApps\...).
+REM `py -3` alone would take the newest 3.x the launcher knows - that can be the Store's.
+set "BASEPY="
+for /f "delims=" %%P in ('py -3.12 -c "import sys; print(sys.executable)" 2^>nul') do call :use_python "%%P"
+for %%P in ("C:\Python312\python.exe" "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" "%ProgramFiles%\Python312\python.exe") do call :use_python "%%~P"
+for /f "delims=" %%P in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do call :use_python "%%P"
+for /f "delims=" %%P in ('where python 2^>nul') do call :use_python "%%P"
+if not defined BASEPY (
+    echo ERROR: no usable Python found ^(the Microsoft Store Python is not used^).
+    echo        Install Python 3.12 from https://www.python.org/downloads/
+    echo        ^(tick "Add python.exe to PATH" and "pip"^) and run LabHub.bat again.
     exit /b 1
 )
+echo Using Python: %BASEPY%
+echo base python: %BASEPY% >> "%LOG%"
+REM --without-pip: some Python installs have no ensurepip, and then venv fails half way.
+"%BASEPY%" -m venv --without-pip "%VENV%" >>"%LOG%" 2>&1
+if not exist "%PY%" (
+    echo ERROR: could not create the virtual environment with %BASEPY%
+    exit /b 1
+)
+REM pip for the venv: 1) ensurepip  2) the base Python's own pip  3) get-pip.py from the internet
+"%PY%" -m ensurepip --upgrade >>"%LOG%" 2>&1
 "%PY%" -m pip --version >nul 2>&1 && exit /b 0
-"%PY%" -m ensurepip --upgrade >nul 2>&1
+echo ensurepip is not available - trying the pip of %BASEPY% ...
+"%BASEPY%" -m pip --python "%PY%" install --disable-pip-version-check pip >>"%LOG%" 2>&1
 "%PY%" -m pip --version >nul 2>&1 && exit /b 0
-echo ERROR: pip is not available for this Python installation.
-echo Install Python 3.11+ from https://www.python.org/downloads/ and try again.
+echo Downloading pip ^(get-pip.py^) ...
+set "GETPIP=%TEMP%\labhub-get-pip.py"
+"%SYS%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -UseBasicParsing https://bootstrap.pypa.io/get-pip.py -OutFile '%GETPIP%'" >>"%LOG%" 2>&1
+if exist "%GETPIP%" "%PY%" "%GETPIP%" --disable-pip-version-check >>"%LOG%" 2>&1
+"%PY%" -m pip --version >nul 2>&1 && exit /b 0
+echo ERROR: pip could not be installed for %BASEPY%
+echo   - reinstall Python 3.11+ from https://www.python.org/downloads/ with the "pip" option ticked, or
+echo   - check the internet / proxy ^(get-pip.py could not be downloaded^)
+echo Then run "LabHub.bat --reset".
 exit /b 1
+
+:use_python
+REM %1 = a python.exe; becomes BASEPY if none was chosen yet, it exists, it is not the
+REM Microsoft Store one, and it is Python 3.10+ with venv.
+if defined BASEPY exit /b 0
+if not exist "%~1" exit /b 0
+echo %~1| "%SYS%\find.exe" /i "WindowsApps" >nul && exit /b 0
+"%~1" -c "import sys, venv; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1 || exit /b 0
+set "BASEPY=%~1"
+exit /b 0
 
 :error
 echo.
