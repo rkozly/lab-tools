@@ -3,7 +3,7 @@ Main window: puts the panels together, owns the status bar and handles
 clean shutdown.
 
 Data flow:
-    DevicesPanel  -> roles_changed     -> CNSS / CONGCTRL / Serial / WPA / hostapd / PKTLOG
+    DevicesPanel  -> roles_changed     -> CNSS / CONGCTRL / Serial / WPA / hostapd / Wifistats / Traffic / PKTLOG
                   -> serial_for(role)  -> used when a collection starts
     PKTLOG groups -> capture_completed -> translation file list
     every panel   -> status_message    -> status bar
@@ -21,7 +21,7 @@ from ..config import APP_NAME, DEFAULT_OUTPUT_DIR, OLD_DEFAULT_OUTPUT_DIR, ORG_N
 from ..core import process
 from ..core.adb import find_adb
 from ..tasks.base_task import BaseTask, State
-from .cnss_panel import CnssPanel, CongctrlPanel
+from .cnss_panel import CnssPanel, CongctrlPanel, TrafficPanel, WifistatsPanel
 from .daemon_panel import HostapdPanel, WpaPanel
 from .devices_panel import DevicesPanel
 from .pktlog_panel import PktlogPanel
@@ -48,10 +48,12 @@ class MainWindow(QMainWindow):
         self.serial = SerialPanel(self.devices, self.settings)
         self.wpa = WpaPanel(self.devices, self.settings)
         self.hostapd = HostapdPanel(self.devices, self.settings)
+        self.wifistats = WifistatsPanel(self.devices, self.settings)
+        self.traffic = TrafficPanel(self.devices, self.settings)
         self.translate = self.pktlog.translate
 
         for panel in (self.devices, self.cnss, self.congctrl, self.serial, self.wpa,
-                      self.hostapd, self.translate,
+                      self.hostapd, self.wifistats, self.traffic, self.translate,
                       *self.pktlog.groups):
             panel.status_message.connect(self.set_status)
 
@@ -65,6 +67,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.serial)
         lay.addWidget(self.wpa)
         lay.addWidget(self.hostapd)
+        lay.addWidget(self.wifistats)
+        lay.addWidget(self.traffic)
         lay.addWidget(self.pktlog)
         lay.addStretch(1)
 
@@ -141,6 +145,8 @@ class MainWindow(QMainWindow):
         self.serial.save_settings(self.settings)
         self.wpa.save_settings(self.settings)
         self.hostapd.save_settings(self.settings)
+        self.wifistats.save_settings(self.settings)
+        self.traffic.save_settings(self.settings)
         self.pktlog.save_settings(self.settings)
 
     # ----- shutdown ---------------------------------------------------------

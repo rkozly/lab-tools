@@ -150,6 +150,74 @@ def default_hostapd_path(role: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Wifistats recording
+# ---------------------------------------------------------------------------
+
+DEFAULT_WIFISTATS_INTERVAL = 10   # seconds between two rounds
+
+_WIFISTATS_RX = (r"wifistats {radio} 10 | grep -E '^rx_bw|^rx_mcs|^rx_legacy_ofdm_rate"
+                 r"|^rssi_in_dbm|pilot_evm_dB\[0\]|pilot_evm_dB\[1\]|la'")
+
+# Commands run on the device every round, in this order. Each one's output
+# is written under a "$ <command>" header line.
+WIFISTATS_AP_COMMANDS = [
+    "wifistats wifi0 9 | grep -E 'Legacy OFDM Rates'",
+    "wifistats wifi1 9 | grep -E 'Legacy OFDM Rates'",
+    "wifistats wifi0 9 | grep -E '^tx_mcs'",
+    "wifistats wifi1 9 | grep -E '^tx_mcs'",
+    _WIFISTATS_RX.format(radio="wifi0"),
+    _WIFISTATS_RX.format(radio="wifi1"),
+    "wlanconfig mld0 list",
+    "wlanconfig mld1 list",
+]
+WIFISTATS_CPE_COMMANDS = [
+    "wifistats wifi0 9 | grep -E '^tx_mcs'",
+    _WIFISTATS_RX.format(radio="wifi0"),
+    "ifconfig ath0",
+    "iw ath0 link",
+]
+
+
+def wifistats_commands(role: str) -> list[str]:
+    return WIFISTATS_AP_COMMANDS if role == AP_ROLE else WIFISTATS_CPE_COMMANDS
+
+
+def default_wifistats_path(role: str) -> str:
+    return rf"{DEFAULT_OUTPUT_DIR}\{role.lower()}_wifistats.txt"
+
+
+# ---------------------------------------------------------------------------
+# Traffic recording (attenuation + interface throughput)
+# ---------------------------------------------------------------------------
+
+DEFAULT_TRAFFIC_INTERVAL = 10     # seconds between two lines
+
+# Attenuators (raw TCP, the MobaXterm sessions 1.1.1.70 / 1.1.1.80).
+# ATTENUATOR_READ_CMD reads the value ("30.00"); sending a number
+# ("12" + Enter) sets it. Only the attenuation sweep sets values.
+# The list is editable in the Traffic Recording panel.
+ATTENUATOR_PORT = 1234
+ATTENUATORS = [("1.1.1.70", ATTENUATOR_PORT), ("1.1.1.80", ATTENUATOR_PORT)]
+ATTENUATOR_READ_CMD = "G"
+ATTEN_MAX_DB = 120
+ATTEN_SWEEP_MAX_STEPS = 60
+DEFAULT_ATTEN_STEP_SECONDS = 10
+
+# iperf runs on the backbone PCs; the devices bridge it, so its traffic
+# shows in the byte counters of these interfaces.
+TRAFFIC_AP_IFACES = ["mld0", "mld1"]
+TRAFFIC_CPE_IFACES = ["ath0"]
+
+
+def traffic_ifaces(role: str) -> list[str]:
+    return TRAFFIC_AP_IFACES if role == AP_ROLE else TRAFFIC_CPE_IFACES
+
+
+def default_traffic_path(role: str) -> str:
+    return rf"{DEFAULT_OUTPUT_DIR}\{role.lower()}_traffic.txt"
+
+
+# ---------------------------------------------------------------------------
 # CONGCTRL (congestion control) logs
 # ---------------------------------------------------------------------------
 

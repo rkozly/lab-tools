@@ -183,3 +183,67 @@ def test_daemon_process_flags():
     assert not has_flags(cmd, ["-dddKt"])
     assert not has_flags("/usr/sbin/hostapd -g x", ["-dddKt"])
     assert pick_global_process("") is None
+
+
+def test_wifistats_round_script():
+    import shutil, subprocess
+    from logcollector.config import WIFISTATS_AP_COMMANDS, wifistats_commands
+    from logcollector.tasks.wifistats_task import build_round_script
+    assert wifistats_commands("AP") == WIFISTATS_AP_COMMANDS
+    assert len(wifistats_commands("CPE3")) == 4
+    cmds = ["echo one", r"echo 'pilot_evm_dB\[0\]|la' | grep -E 'la'"]
+    script = build_round_script(cmds)
+    sh = shutil.which("sh")
+    if sh:  # run it with a real shell when one is available
+        out = subprocess.run([sh, "-c", script], capture_output=True, text=True).stdout
+        assert out.splitlines() == ["$ echo one", "one", f"$ {cmds[1]}",
+                                    r"pilot_evm_dB\[0\]|la"]
+
+
+def test_attenuation_parse():
+    from logcollector.core.attenuator import format_readings, parse_attenuation
+    assert parse_attenuation(b"30.00\x00") == 30.0
+    assert parse_attenuation(b"0.00\x00") == 0.0
+    assert parse_attenuation(b"") is None
+    assert parse_attenuation(b"ERR\x00") is None
+    assert format_readings([("1.1.1.70", 30.0), ("1.1.1.80", None)]) == \
+        "1.1.1.70=30.00 dB 1.1.1.80=? dB"
+
+
+def test_traffic_rates():
+    from logcollector.tasks.traffic_task import format_rates, mbps, parse_counters
+    cur = parse_counters("mld0 2250000000 1000\nmld1 - -\njunk\n")
+    assert cur == {"mld0": (2250000000, 1000), "mld1": (None, None)}
+    assert mbps(0, 125_000_000, 10) == 100.0
+    assert mbps(500, 100, 10) is None          # counter reset
+    prev = {"ath0": (0, 0)}
+    assert format_rates(["ath0"], prev, {"ath0": (125_000_000, 1_250_000)}, 10) == \
+        "ath0 rx 100.0 tx 1.0 Mbit/s"
+    out = format_rates(["mld0", "mld1"], {"mld0": (0, 0), "mld1": (0, 0)},
+                       {"mld0": (125_000_000, 0), "mld1": (125_000_000, 0)}, 10)
+    assert out.endswith("total rx 200.0 tx 0.0 Mbit/s")
+    assert "mld1 missing" in format_rates(["mld0", "mld1"], {}, {"mld0": (1, 1)}, 10)
+
+
+def test_attenuation_sweep_input():
+    from logcollector.core.attenuator import (format_attenuators, format_db,
+                                              parse_attenuators, parse_steps)
+    assert parse_steps("0,1,2,1, 2;3 4") == [0, 1, 2, 1, 2, 3, 4]
+    assert parse_steps("12.5") == [12.5]
+    assert len(parse_steps(",".join(["1"] * 60))) == 60
+    for bad in ("", "1,x", "-1", "999", ",".join(["1"] * 61)):
+        try:
+            parse_steps(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")
+    assert format_db(12.0) == "12" and format_db(12.5) == "12.5"
+    atts = parse_attenuators("1.1.1.70, 1.1.1.80:4000")
+    assert atts == [("1.1.1.70", 1234), ("1.1.1.80", 4000)]
+    assert format_attenuators(atts) == "1.1.1.70, 1.1.1.80:4000"
+    for bad in ("", "1.1.1.70:x", "a b|c"):
+        try:
+            parse_attenuators(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")

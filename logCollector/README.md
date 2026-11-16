@@ -118,6 +118,47 @@ For each device the tool runs:
    - CPE: `wifitool ath0 link_id 0 setUnitTestCmd 0x48 3 537 1 1`
 3. `adb -s <serial> shell "cnss_diag -c | grep CONGCTRL" > <file>` until stopped
 
+### Wifistats recording
+Records rate / RSSI / EVM statistics every N seconds (default 10 s) to a text file, one file per device.
+
+1. Tick AP and/or CPEs, check the output paths and the **Interval**, then **Start Collection**.
+2. Every round runs the command list below in one `adb shell` call and appends the output under a `===== <time> | <role> | round N =====` line, with a `$ <command>` header before each command's output.
+3. **Stop** on a row, or **Stop All**, ends the recording. A round that fails (device rebooting) is noted in the file and recording continues; it gives up after 30 failed rounds in a row.
+
+Commands (edit `WIFISTATS_AP_COMMANDS` / `WIFISTATS_CPE_COMMANDS` in `config.py`):
+- AP: `wifistats wifi0|wifi1 9 | grep -E 'Legacy OFDM Rates'`, `wifistats wifi0|wifi1 9 | grep -E '^tx_mcs'`, `wifistats wifi0|wifi1 10 | grep -E '^rx_bw|^rx_mcs|...|la'`, `wlanconfig mld0 list`, `wlanconfig mld1 list`
+- CPE: `wifistats wifi0 9 | grep -E '^tx_mcs'`, `wifistats wifi0 10 | grep -E '^rx_bw|^rx_mcs|...|la'`, `ifconfig ath0`, `iw ath0 link`
+
+Default output files: `\\bulk\si\Users\rkozly\ap_wifistats.txt`, `cpe1_wifistats.txt`, ... (editable per device). Existing files are appended to.
+
+### Traffic recording
+Records the attenuation and the traffic every N seconds (default 10 s) to a text file, one file per device. It does **not** start iperf: start iperf yourself on the BB PCs. The devices bridge that traffic, so it is measured from the byte counters of `ath0` (CPE) and `mld0` + `mld1` (AP).
+
+1. Tick AP and/or CPEs, check the output paths and the **Interval**, then **Start Collection**.
+2. Every line has a timestamp, the attenuation of both attenuators and the rx / tx Mbit/s of each interface (the AP also gets a total):
+   ```
+   2026-10-29 15:00:20 | att 1.1.1.70=35.00 dB 1.1.1.80=35.00 dB  <-- changed | ath0 rx 140.2 tx 2.7 Mbit/s
+   ```
+   The first line after Start is a baseline with no rates. `<-- changed` marks a change of attenuation. `?` means the attenuator did not answer, or the counter went back (device rebooted).
+3. **Stop** on a row, or **Stop All**, ends the recording. Existing files are appended to.
+
+**Attenuators.** The **Attenuators** field lists the attenuator addresses, comma separated: by default `1.1.1.70, 1.1.1.80`, the MobaXterm sessions (raw TCP, port 1234; write `host:port` for another port). Each line reads every attenuator with `G`. Close those sessions in MobaXterm if the value shows `?`.
+
+**Custom attenuations (sweep).** Tick **Custom attenuations** to have the tool set the attenuation itself:
+
+1. Enter the values in dB, comma separated, e.g. `0,1,2,1,2,3,4,5,6`. At most 60 values, each from 0 to 120 dB.
+2. Set **Each step**: how long each value is held (default 10 s).
+3. **Start Collection** starts the recordings of the ticked devices and the sweep. To run only the sweep, tick no device. For each step every attenuator is set to the value (the number + Enter, as typed in MobaXterm) and read back to confirm. If an attenuator does not take the value, the sweep stops with an error.
+4. The progress bar and the value list show the current step: done steps in gray, the current one as **[value]**. Every traffic line written during the sweep names its step:
+   ```
+   2026-10-29 15:00:20 | att 1.1.1.70=2.00 dB 1.1.1.80=2.00 dB | step 3/9 2 dB | ath0 rx 140.2 tx 2.7 Mbit/s
+   ```
+5. After the last step the attenuation stays at the last value. With **Stop recording at the end** ticked, the recordings stop too. **Stop All** stops the sweep at the current value.
+
+Interfaces and limits: `TRAFFIC_AP_IFACES`, `TRAFFIC_CPE_IFACES`, `ATTEN_SWEEP_MAX_STEPS`, `ATTEN_MAX_DB` in `config.py`.
+
+Default output files: `\\bulk\si\Users\rkozly\ap_traffic.txt`, `cpe1_traffic.txt`, ... (editable per device).
+
 ### Serial (dmesg / console)
 Saves each device's serial console to a file. This is the same output MobaXterm shows: kernel (dmesg) messages, boot and crash output.
 
@@ -205,6 +246,7 @@ logCollector/
       adb.py                find adb, parse `adb devices`, env/registry role mapping
       crm.py                latest CRM detection
       serial_ports.py       COM port per role (MobaXterm sessions, serial_port_<role>)
+      attenuator.py         attenuator read (G) / set (number) over TCP, sweep list parsing
       daemon_config.py      wpa_supplicant / hostapd file edits and process flag checks
       paths.py              output/input path validation (network share, permissions)
     tasks/                  background jobs (QThread subclasses)
@@ -213,6 +255,9 @@ logCollector/
       cnss_task.py          cnss_diag streaming
       serial_task.py        COM port -> file streaming
       daemon_log_task.py    wpa / hostapd: check + fix, live log streaming across reboots
+      wifistats_task.py     wifistats command rounds every N seconds
+      traffic_task.py       attenuation + interface throughput every N seconds
+      atten_sweep_task.py   sets the attenuators to each value of a list
       pktlog_task.py        pktlog configure / wait / copy / pull
       translate_task.py     one pktlog_postproc.py run
       translate_queue.py    runs many TranslateTasks in parallel (max N at once)
@@ -222,7 +267,7 @@ logCollector/
       widgets.py            StatusLabel, PathEdit, FolderFileEdit,
                             CheckGrid / CheckedRows (dynamic device check boxes)
       devices_panel.py      device table, emits roles_changed after each scan
-      cnss_panel.py         CNSS section
+      cnss_panel.py         CNSS, CONGCTRL, Wifistats and Traffic sections
       serial_panel.py       Serial (dmesg / console) section
       daemon_panel.py       WPA Supplicant (CPE) and Hostapd (AP) sections
       pktlog_panel.py       PKTLOG block: AP group, CPE group, translation group

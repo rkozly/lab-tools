@@ -68,6 +68,38 @@ def _check_device(task: BaseTask, profile: DaemonLogProfile, serial: str) -> dic
             "fixable": not missing, "message": message}
 
 
+def _apply_edits(task: BaseTask, profile: DaemonLogProfile, serial: str) -> None:
+    """Pull each start-up file, apply the edits, push it back (only files that change)."""
+    tmp = tempfile.mkdtemp(prefix="logcollector_")
+    try:
+        for path in profile.files():
+            edits = [e for e in profile.edits if e.path == path]
+            task.status.emit(State.WAITING, f"Changing {path}...")
+            local = os.path.join(tmp, os.path.basename(path))
+            task.adb(serial, "pull", path, local, timeout=60, check=True)
+            with open(local, "rb") as f:
+                # latin-1 maps every byte to one character: lossless.
+                text = f.read().decode("latin-1")
+            new = apply_edits(text, edits)
+            if new == text:
+                continue
+            with open(local, "wb") as f:
+                f.write(new.encode("latin-1"))
+            staged = f"/tmp/{os.path.basename(path)}.logcollector"
+            task.adb(serial, "push", local, staged, timeout=60, check=True)
+            # Keep the first original as a backup. `cat >` instead of
+            # moving the file keeps its permissions (init scripts must
+            # stay executable).
+            task.adb(serial, "shell",
+                     f"[ -f {path}.orig ] || cp -p {path} {path}.orig; "
+                     f"cat {staged} > {path} && rm {staged} && sync",
+                     timeout=SHELL_TIMEOUT, check=True)
+            task.log.info("Changed %s (backup %s.orig)", path, path,
+                          extra={"device": task.device})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 class DaemonCheckTask(BaseTask):
     # report: files {path: done/needed/missing}, cmdline, files_ok,
     #         process_ok, ok, fixable, message
@@ -100,34 +132,7 @@ class DaemonCheckTask(BaseTask):
         return (State.COMPLETED if report["ok"] else State.ERROR), report["message"]
 
     def _apply_edits(self):
-        tmp = tempfile.mkdtemp(prefix="logcollector_")
-        try:
-            for path in self.profile.files():
-                edits = [e for e in self.profile.edits if e.path == path]
-                self.status.emit(State.WAITING, f"Changing {path}...")
-                local = os.path.join(tmp, os.path.basename(path))
-                self.adb(self.serial, "pull", path, local, timeout=60, check=True)
-                with open(local, "rb") as f:
-                    # latin-1 maps every byte to one character: lossless.
-                    text = f.read().decode("latin-1")
-                new = apply_edits(text, edits)
-                if new == text:
-                    continue
-                with open(local, "wb") as f:
-                    f.write(new.encode("latin-1"))
-                staged = f"/tmp/{os.path.basename(path)}.logcollector"
-                self.adb(self.serial, "push", local, staged, timeout=60, check=True)
-                # Keep the first original as a backup. `cat >` instead of
-                # moving the file keeps its permissions (init scripts must
-                # stay executable).
-                self.adb(self.serial, "shell",
-                         f"[ -f {path}.orig ] || cp -p {path} {path}.orig; "
-                         f"cat {staged} > {path} && rm {staged} && sync",
-                         timeout=SHELL_TIMEOUT, check=True)
-                self.log.info("Changed %s (backup %s.orig)", path, path,
-                              extra={"device": self.device})
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        _apply_edits(self, self.profile, self.serial)
 
     def _restart(self):
         if self.reboot:
@@ -146,9 +151,18 @@ class DaemonCheckTask(BaseTask):
 
     def _wait_until_verified(self) -> dict:
         end = time.monotonic() + VERIFY_TIMEOUT
+        reapplied = 0
         while True:
             self.status.emit(State.WAITING, f"Waiting for {self.profile.binary}...")
             report = _check_device(self, self.profile, self.serial)
+            # Some files do not keep the change over a reboot / wifi reload (seen with
+            # /lib/wifi/hostapd.sh): change them again instead of waiting for nothing.
+            if not report["files_ok"] and report["fixable"] and reapplied < 3:
+                reapplied += 1
+                self.log.warning("Start-up file changed back (%s) - applying the change again",
+                                 report["message"], extra={"device": self.device})
+                self._apply_edits()
+                continue
             if report["ok"] or time.monotonic() > end:
                 if not report["ok"]:
                     report["message"] += " (after restart; try Reboot)"
@@ -198,6 +212,7 @@ class DaemonLogTask(BaseTask):
                         if new_boot != boot:
                             self._mark(f, "device rebooted - new log starts here")
                             boot, received = new_boot, 0
+                            self._reapply_after_reboot(f)
                         elif size is not None and size < received:
                             self._mark(f, "device log was truncated - restarting from its start")
                             received = 0
@@ -228,6 +243,19 @@ class DaemonLogTask(BaseTask):
             raise TaskError(f"Permission denied writing to:\n{self.output_path}")
         except OSError as e:
             raise TaskError(f"Cannot write output file:\n{e}")
+
+    def _reapply_after_reboot(self, f) -> None:
+        """A start-up file may be back to the original after a reboot (e.g. hostapd.sh's
+        close_log line, which makes hostapd close its log): change it again."""
+        try:
+            self.adb(self.serial, "wait-for-device", "root", timeout=60)
+            report = _check_device(self, self.profile, self.serial)
+            if not report["files_ok"] and report["fixable"]:
+                _apply_edits(self, self.profile, self.serial)
+                self._mark(f, "start-up file was changed back by the reboot - change applied again")
+        except TaskError as e:
+            self.log.warning("Could not re-apply the change after reboot: %s", e,
+                             extra={"device": self.device})
 
     def _stream_cmd(self, offset: int) -> str:
         log = self.profile.remote_log
